@@ -166,7 +166,7 @@ wss.on('connection', (ws) => {
           state.cookies.splice(i, 1);
           p.score += 1;
           spawnCookie();
-          console.log(`🍪 ${sessionId} съел печеньку, очки=${p.score}`);
+          console.log(` ${sessionId} +балл, очки=${p.score}`);
         }
       }
 
