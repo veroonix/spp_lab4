@@ -159,7 +159,7 @@ wss.on('connection', (ws) => {
       }
       if (!blocked) { p.x = nx; p.y = ny; }
 
-      // атомарный захват печеньки
+      // атомарный захват монетки
       for (let i = state.cookies.length - 1; i >= 0; i--) {
         const c = state.cookies[i];
         if (overlaps({ x: p.x, y: p.y }, c, PLAYER_SIZE, COOKIE_SIZE)) {
