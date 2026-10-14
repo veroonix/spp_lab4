@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Lab4 — Multiplayer Game</title>
+  <style>
+    body {
+      margin: 0; background: #1a1a1a; color: #eee;
+      font-family: monospace;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      min-height: 100vh; gap: 12px; padding: 20px;
+    }
+    canvas { background: #eee; border: 2px solid #444; border-radius: 4px; }
+    #hud { display: flex; gap: 20px; font-size: 14px; align-items: center; }
+    #status { padding: 4px 12px; border-radius: 6px; background: #444; transition: background 0.3s; }
+    #status.online { background: #2a7d4b; }
+    #status.offline { background: #a33; }
+    #scores {
+      width: 600px; max-height: 120px; overflow-y: auto;
+      background: #252525; border-radius: 6px; padding: 8px;
+      font-size: 13px; line-height: 1.5;
+    }
+    #scores .me { color: #ffeb3b; font-weight: bold; }
+    #scores .dead { opacity: 0.4; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <span id="status" class="offline">соединение…</span>
+    <span>ID: <b id="me">—</b></span>
+    <span>Очки: <b id="score">0</b></span>
+  </div>
+
+  <canvas id="game" width="600" height="400"></canvas>
+
+  <div id="scores"></div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const SIZE = 20;
+    const COOKIE = 12;
+
+    let socket = null;
+    let myId = null;
+    let players = {};
+    let cookies = [];
+    let reconnectTimer = null;
+
+    const SESSION_KEY = 'lab4-session-id';
+
+    function setStatus(text, cls) {
+      const s = document.getElementById('status');
+      s.textContent = text;
+      s.className = cls;
+    }
+
+    // ===== Подключение + авто-реконнект =====
+    function connect() {
+      clearTimeout(reconnectTimer);
+
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      socket = new WebSocket(`${protocol}//${location.host}/ws`);
+
+      socket.onopen = () => {
+        setStatus('онлайн', 'online');
+        const saved = localStorage.getItem(SESSION_KEY);
+        socket.send(JSON.stringify({ type: 'hello', sessionId: saved }));
+      };
+
+      socket.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+
+        if (msg.type === 'init') {
+          myId = msg.id;
+          localStorage.setItem(SESSION_KEY, myId);
+          players = msg.players;
+          cookies = msg.cookies;
+          document.getElementById('me').textContent = myId;
+        } else if (msg.type === 'state') {
+          players = msg.players;
+          cookies = msg.cookies;
+        } else if (msg.type === 'join') {
+          players[msg.id] = msg.player;
+        } else if (msg.type === 'offline') {
+          if (players[msg.id]) players[msg.id].online = false;
+        }
+
+        draw();
+        renderScores();
+      };
+
+      socket.onclose = () => {
+        setStatus('оффлайн — переподключение…', 'offline');
+        reconnectTimer = setTimeout(connect, 1500);
+      };
+
+      socket.onerror = () => socket.close();
+    }
+
+    // ===== Отрисовка =====
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // печеньки
+      for (const c of cookies) {
+        ctx.fillStyle = '#e6b800';
+        ctx.beginPath();
+        ctx.arc(c.x + COOKIE / 2, c.y + COOKIE / 2, COOKIE / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // игроки
+      for (const id in players) {
+        const p = players[id];
+        ctx.globalAlpha = p.online === false ? 0.35 : 1;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x, p.y, SIZE, SIZE);
+
+        if (id === myId) {
+          ctx.strokeStyle = '#000';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(p.x, p.y, SIZE, SIZE);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function renderScores() {
+      const el = document.getElementById('scores');
+      const sorted = Object.entries(players).sort((a, b) => b[1].score - a[1].score);
+
+      el.innerHTML = sorted.map(([id, p]) => {
+        const cls = [id === myId ? 'me' : '', p.online === false ? 'dead' : ''].join(' ');
+        const mark = id === myId ? '★' : '•';
+        const status = p.online === false ? ' (оффлайн)' : '';
+        return `<div class="${cls}">${mark} ${id} — ${p.score}${status}</div>`;
+      }).join('');
+
+      if (myId && players[myId]) {
+        document.getElementById('score').textContent = players[myId].score;
+      }
+    }
+
+    // ===== Управление =====
+    window.addEventListener('keydown', (e) => {
+      const moves = {
+        ArrowUp: [0, -10], ArrowDown: [0, 10],
+        ArrowLeft: [-10, 0], ArrowRight: [10, 0],
+        w: [0, -10], s: [0, 10], a: [-10, 0], d: [10, 0],
+        ц: [0, -10], ы: [0, 10], ф: [-10, 0], в: [10, 0]
+      };
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      const m = moves[key];
+      if (!m) return;
+
+      e.preventDefault();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'move', dx: m[0], dy: m[1] }));
+      }
+    });
+
+    connect();
+  </script>
+</body>
+</html>

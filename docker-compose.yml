@@ -1,0 +1,27 @@
+services:
+  server:
+    build:
+      context: ./server
+    container_name: lab4-server
+    restart: unless-stopped
+    expose:
+      - "8080"
+    volumes:
+      - game-state:/app/state
+    environment:
+      - STATE_FILE=/app/state/state.json
+      - PORT=8080
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    container_name: lab4-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - server
+
+volumes:
+  game-state:

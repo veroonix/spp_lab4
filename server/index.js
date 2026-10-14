@@ -1,0 +1,184 @@
+const WebSocket = require('ws');
+const fs = require('fs');
+const path = require('path');
+
+const PORT = process.env.PORT || 8080;
+const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
+
+const MAP = { w: 600, h: 400 };
+const PLAYER_SIZE = 20;
+const COOKIE_SIZE = 12;
+const COOKIE_COUNT = 8;
+
+let state = {
+  players: {},   // sessionId -> { x, y, color, score, online, lastSeen }
+  cookies: []    // [{ id, x, y }]
+};
+
+// ---------- утилиты ----------
+const rnd = (max) => Math.floor(Math.random() * max);
+const randomColor = () =>
+  '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0');
+const randomId = () => Math.random().toString(36).substring(2, 11);
+
+function randomPos(size) {
+  return { x: rnd(MAP.w - size), y: rnd(MAP.h - size) };
+}
+
+function spawnCookie() {
+  state.cookies.push({ id: randomId(), ...randomPos(COOKIE_SIZE) });
+}
+
+function overlaps(a, b, sa, sb) {
+  return a.x < b.x + sb && a.x + sa > b.x &&
+         a.y < b.y + sb && a.y + sa > b.y;
+}
+
+// ---------- загрузка состояния ----------
+if (fs.existsSync(STATE_FILE)) {
+  try {
+    const loaded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    state.players = loaded.players || {};
+    state.cookies = loaded.cookies || [];
+    // после рестарта все оффлайн
+    for (const id in state.players) state.players[id].online = false;
+    console.log(`Загружено: ${Object.keys(state.players).length} игроков, ${state.cookies.length} печенек`);
+  } catch (e) {
+    console.error('Ошибка загрузки state:', e.message);
+  }
+}
+
+while (state.cookies.length < COOKIE_COUNT) spawnCookie();
+
+function saveState() {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+  } catch (e) {
+    console.error('Ошибка сохранения state:', e.message);
+  }
+}
+
+// ---------- WebSocket ----------
+const wss = new WebSocket.Server({ port: PORT, host: '0.0.0.0' });
+console.log(`WS сервер на порту ${PORT}`);
+
+function broadcast(msg, except = null) {
+  const str = JSON.stringify(msg);
+  for (const c of wss.clients) {
+    if (c !== except && c.readyState === WebSocket.OPEN) c.send(str);
+  }
+}
+
+wss.on('connection', (ws) => {
+  let sessionId = null;
+
+  ws.on('message', (raw) => {
+    let data;
+    try { data = JSON.parse(raw); } catch { return; }
+
+    // ===== HELLO: первое сообщение (новый игрок или реконнект) =====
+    if (data.type === 'hello') {
+      if (data.sessionId && state.players[data.sessionId]) {
+        // === РЕКОННЕКТ ===
+        sessionId = data.sessionId;
+        state.players[sessionId].online = true;
+        state.players[sessionId].lastSeen = Date.now();
+        console.log(`Реконнект: ${sessionId}`);
+      } else {
+        // === НОВЫЙ ИГРОК ===
+        sessionId = randomId();
+        state.players[sessionId] = {
+          ...randomPos(PLAYER_SIZE),
+          color: randomColor(),
+          score: 0,
+          online: true,
+          lastSeen: Date.now()
+        };
+        console.log(`Новый игрок: ${sessionId}`);
+      }
+
+      ws.send(JSON.stringify({
+        type: 'init',
+        id: sessionId,
+        players: state.players,
+        cookies: state.cookies
+      }));
+
+      broadcast({ type: 'join', id: sessionId, player: state.players[sessionId] }, ws);
+      saveState();
+      return;
+    }
+
+    if (!sessionId || !state.players[sessionId]) return;
+    state.players[sessionId].lastSeen = Date.now();
+
+    // ===== MOVE =====
+    if (data.type === 'move') {
+      const p = state.players[sessionId];
+
+      // 1) границы карты
+      const nx = Math.max(0, Math.min(MAP.w - PLAYER_SIZE, p.x + data.dx));
+      const ny = Math.max(0, Math.min(MAP.h - PLAYER_SIZE, p.y + data.dy));
+
+      // 2) коллизия с другими игроками
+      let blocked = false;
+      for (const otherId in state.players) {
+        if (otherId === sessionId) continue;
+        if (overlaps({ x: nx, y: ny }, state.players[otherId], PLAYER_SIZE, PLAYER_SIZE)) {
+          blocked = true;
+          break;
+        }
+      }
+
+      if (!blocked) { p.x = nx; p.y = ny; }
+
+      // 3) ЗАХВАТ ПЕЧЕНЬКИ — атомарно
+      //    В JS однопоточно, поэтому "кто первый дошёл до этой строки — тот и съел".
+      //    Даже если 2 игрока в одном тике прислали move — обработается по очереди,
+      //    второй уже не найдёт печеньку в массиве.
+      for (let i = state.cookies.length - 1; i >= 0; i--) {
+        const c = state.cookies[i];
+        if (overlaps({ x: p.x, y: p.y }, c, PLAYER_SIZE, COOKIE_SIZE)) {
+          state.cookies.splice(i, 1);
+          p.score += 1;
+          spawnCookie();
+          console.log(`🍪 ${sessionId} съел печеньку, очки=${p.score}`);
+        }
+      }
+
+      // 4) рассылка
+      broadcast({
+        type: 'state',
+        players: state.players,
+        cookies: state.cookies
+      });
+
+      saveState();
+    }
+
+    if (data.type === 'ping') {
+      ws.send(JSON.stringify({ type: 'pong' }));
+    }
+  });
+
+  ws.on('close', () => {
+    if (sessionId && state.players[sessionId]) {
+      state.players[sessionId].online = false;
+      state.players[sessionId].lastSeen = Date.now();
+      broadcast({ type: 'offline', id: sessionId });
+      saveState();
+      console.log(`Оффлайн: ${sessionId}`);
+    }
+  });
+
+  ws.on('error', (e) => console.error('WS error:', e.message));
+});
+
+// ===== корректное завершение =====
+['SIGTERM', 'SIGINT'].forEach(sig => {
+  process.on(sig, () => {
+    console.log(`${sig} — сохраняю состояние...`);
+    saveState();
+    wss.close(() => process.exit(0));
+  });
+});
