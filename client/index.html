@@ -13,8 +13,8 @@
       transition: opacity 0.3s, filter 0.3s;
     }
     body.offline {
-      opacity: 0.6;
-      filter: grayscale(0.5);
+      opacity: 0.55;
+      filter: grayscale(0.6);
     }
     canvas { background: #eee; border: 2px solid #444; border-radius: 4px; }
     #hud { display: flex; gap: 20px; font-size: 14px; align-items: center; }
@@ -64,9 +64,11 @@
     let players = {};
     let cookies = [];
     let reconnectTimer = null;
+    let offlineTimer = null;
     let isOnline = false;
 
     const SESSION_KEY = 'lab4-session-id';
+    const OFFLINE_TIMEOUT = 8000;
 
     const statusEl = document.getElementById('status');
     const bannerEl = document.getElementById('offline-banner');
@@ -77,9 +79,26 @@
     }
 
     function setOnline(online) {
+      if (isOnline === online) return;
       isOnline = online;
       document.body.classList.toggle('offline', !online);
       bannerEl.style.display = online ? 'none' : 'block';
+      if (online) {
+        clearTimeout(offlineTimer);
+        startOfflineTimer();
+      } else {
+        clearTimeout(offlineTimer);
+      }
+    }
+
+    function startOfflineTimer() {
+      clearTimeout(offlineTimer);
+      offlineTimer = setTimeout(() => {
+        setOnline(false);
+        setStatus('оффлайн — нет ответа от сервера', 'reconnecting');
+        if (socket) socket.close();
+        reconnectTimer = setTimeout(connect, 1500);
+      }, OFFLINE_TIMEOUT);
     }
 
     // ===== Подключение + авто-реконнект =====
@@ -97,6 +116,12 @@
       };
 
       socket.onmessage = (e) => {
+        // сбрасываем оффлайн-таймер при любом сообщении от сервера
+        if (isOnline) {
+          clearTimeout(offlineTimer);
+          startOfflineTimer();
+        }
+
         const msg = JSON.parse(e.data);
 
         if (msg.type === 'init') {
@@ -193,6 +218,13 @@
     });
 
     connect();
+
+    // При возврате на вкладку — если давно не было сообщений, форсируем реконнект
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && socket && socket.readyState === WebSocket.OPEN && !isOnline) {
+        setTimeout(connect, 500);
+      }
+    });
   </script>
 </body>
 </html>
