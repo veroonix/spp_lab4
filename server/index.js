@@ -8,10 +8,10 @@ const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
 const CLIENT_DIR = path.join(__dirname, '..', 'client');
 
 // ---------- heartbeat / оффлайн-таймаут ----------
-// Пингуем клиентов каждые 30 секунд. Если на пинг нет ответа 10 секунд —
+// Пингуем клиентов каждые 5 секунд. Если на пинг нет ответа 5 секунд —
 // считаем соединение потерянным и помечаем игрока оффлайн.
-const HEARTBEAT_INTERVAL = 30000;
-const HEARTBEAT_TIMEOUT = 10000;
+const HEARTBEAT_INTERVAL = 5000;
+const HEARTBEAT_TIMEOUT = 5000;
 
 const MAP = { w: 600, h: 400 };
 const PLAYER_SIZE = 20;
