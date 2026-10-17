@@ -10,12 +10,27 @@
       display: flex; flex-direction: column;
       align-items: center; justify-content: center;
       min-height: 100vh; gap: 12px; padding: 20px;
+      transition: opacity 0.3s, filter 0.3s;
+    }
+    body.offline {
+      opacity: 0.6;
+      filter: grayscale(0.5);
     }
     canvas { background: #eee; border: 2px solid #444; border-radius: 4px; }
     #hud { display: flex; gap: 20px; font-size: 14px; align-items: center; }
     #status { padding: 4px 12px; border-radius: 6px; background: #444; transition: background 0.3s; }
     #status.online { background: #2a7d4b; }
     #status.offline { background: #a33; }
+    #status.reconnecting { background: #e89c13; animation: blink 1s infinite; }
+    @keyframes blink { 50% { opacity: 0.7; } }
+    #offline-banner {
+      display: none;
+      position: fixed; top: 0; left: 0; right: 0;
+      background: #a33; color: #fff; text-align: center;
+      padding: 12px; font-size: 16px; font-weight: bold;
+      z-index: 1000;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
     #scores {
       width: 600px; max-height: 120px; overflow-y: auto;
       background: #252525; border-radius: 6px; padding: 8px;
@@ -26,6 +41,8 @@
   </style>
 </head>
 <body>
+  <div id="offline-banner">⚠️ Нет соединения с сервером — переподключение…</div>
+
   <div id="hud">
     <span id="status" class="offline">соединение…</span>
     <span>ID: <b id="me">—</b></span>
@@ -47,13 +64,22 @@
     let players = {};
     let cookies = [];
     let reconnectTimer = null;
+    let isOnline = false;
 
     const SESSION_KEY = 'lab4-session-id';
 
+    const statusEl = document.getElementById('status');
+    const bannerEl = document.getElementById('offline-banner');
+
     function setStatus(text, cls) {
-      const s = document.getElementById('status');
-      s.textContent = text;
-      s.className = cls;
+      statusEl.textContent = text;
+      statusEl.className = cls;
+    }
+
+    function setOnline(online) {
+      isOnline = online;
+      document.body.classList.toggle('offline', !online);
+      bannerEl.style.display = online ? 'none' : 'block';
     }
 
     // ===== Подключение + авто-реконнект =====
@@ -64,6 +90,7 @@
       socket = new WebSocket(`${protocol}//${location.host}/ws`);
 
       socket.onopen = () => {
+        setOnline(true);
         setStatus('онлайн', 'online');
         const saved = localStorage.getItem(SESSION_KEY);
         socket.send(JSON.stringify({ type: 'hello', sessionId: saved }));
@@ -92,11 +119,15 @@
       };
 
       socket.onclose = () => {
-        setStatus('оффлайн — переподключение…', 'offline');
+        setOnline(false);
+        setStatus('оффлайн — переподключение…', 'reconnecting');
         reconnectTimer = setTimeout(connect, 1500);
       };
 
-      socket.onerror = () => socket.close();
+      socket.onerror = () => {
+        setOnline(false);
+        socket.close();
+      };
     }
 
     // ===== Отрисовка =====
@@ -156,7 +187,7 @@
       if (!m) return;
 
       e.preventDefault();
-      if (socket && socket.readyState === WebSocket.OPEN) {
+      if (socket && socket.readyState === WebSocket.OPEN && isOnline) {
         socket.send(JSON.stringify({ type: 'move', dx: m[0], dy: m[1] }));
       }
     });
