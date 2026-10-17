@@ -234,7 +234,10 @@ wss.on('connection', (ws) => {
       let blocked = false;
       for (const otherId in state.players) {
         if (otherId === ws.sessionId) continue;
-        if (overlaps({ x: nx, y: ny }, state.players[otherId], PLAYER_SIZE, PLAYER_SIZE)) {
+        const other = state.players[otherId];
+        // сквозные оффлайн-игроки — не блокируют движение
+        if (other.online === false) continue;
+        if (overlaps({ x: nx, y: ny }, other, PLAYER_SIZE, PLAYER_SIZE)) {
           blocked = true; break;
         }
       }
