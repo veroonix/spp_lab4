@@ -13,6 +13,12 @@ const CLIENT_DIR = path.join(__dirname, '..', 'client');
 const HEARTBEAT_INTERVAL = 5000;
 const HEARTBEAT_TIMEOUT = 5000;
 
+// ---------- неактивность и серверный пинг ----------
+// Если игрок не присылал сообщений (move/hello) дольше этого — оффлайн для остальных.
+const INACTIVITY_TIMEOUT = 60000;
+// Сервер шлёт ping всем клиентам, чтобы соединение не простаивало и клиент не думал, что пропал.
+const SERVER_PING_INTERVAL = 15000;
+
 const MAP = { w: 600, h: 400 };
 const PLAYER_SIZE = 20;
 const COOKIE_SIZE = 12;
@@ -128,6 +134,35 @@ const heartbeatInterval = setInterval(() => {
   }
 }, HEARTBEAT_INTERVAL);
 
+// ---------- серверный пинг клиентам (чтобы не простаивало соединение) ----------
+const serverPingInterval = setInterval(() => {
+  broadcast({ type: 'ping' });
+}, SERVER_PING_INTERVAL);
+
+// ---------- проверка неактивности игроков ----------
+const inactivityInterval = setInterval(() => {
+  const now = Date.now();
+  for (const id in state.players) {
+    const p = state.players[id];
+    if (p.online && now - p.lastSeen > INACTIVITY_TIMEOUT) {
+      p.online = false;
+      p.lastSeen = now;
+      broadcast({ type: 'offline', id });
+      saveState();
+      console.log(`Неактивен: ${id}`);
+    }
+  }
+}, 10000);
+
+// очищаем интервалы при завершении процесса
+['SIGTERM', 'SIGINT'].forEach((sig) => {
+  process.on(sig, () => {
+    clearInterval(heartbeatInterval);
+    clearInterval(serverPingInterval);
+    clearInterval(inactivityInterval);
+  });
+});
+
 console.log('State file:', STATE_FILE);
 
 function broadcast(msg, except = null) {
@@ -188,6 +223,7 @@ wss.on('connection', (ws) => {
 
     if (!ws.sessionId || !state.players[ws.sessionId]) return;
     state.players[ws.sessionId].lastSeen = Date.now();
+    state.players[ws.sessionId].online = true;
 
     if (data.type === 'move') {
       const p = state.players[ws.sessionId];

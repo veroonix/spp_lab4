@@ -41,7 +41,7 @@
   </style>
 </head>
 <body>
-  <div id="offline-banner">⚠️ Нет соединения с сервером — переподключение…</div>
+  <div id="offline-banner">Нет соединения с сервером — переподключение…</div>
 
   <div id="hud">
     <span id="status" class="offline">соединение…</span>
@@ -68,7 +68,7 @@
     let isOnline = false;
 
     const SESSION_KEY = 'lab4-session-id';
-    const OFFLINE_TIMEOUT = 8000;
+    const OFFLINE_TIMEOUT = 30000;
 
     const statusEl = document.getElementById('status');
     const bannerEl = document.getElementById('offline-banner');
@@ -97,7 +97,7 @@
         setOnline(false);
         setStatus('оффлайн — нет ответа от сервера', 'reconnecting');
         if (socket) socket.close();
-        reconnectTimer = setTimeout(connect, 1500);
+        // onclose сам назначит повторное подключение
       }, OFFLINE_TIMEOUT);
     }
 
@@ -117,14 +117,20 @@
 
       socket.onmessage = (e) => {
         // сбрасываем оффлайн-таймер при любом сообщении от сервера
-        if (isOnline) {
-          clearTimeout(offlineTimer);
-          startOfflineTimer();
+        clearTimeout(offlineTimer);
+        startOfflineTimer();
+
+        // если были оффлайн, а пришло сообщение — снова онлайн
+        if (!isOnline) {
+          setOnline(true);
+          setStatus('онлайн', 'online');
         }
 
         const msg = JSON.parse(e.data);
 
-        if (msg.type === 'init') {
+        if (msg.type === 'ping') {
+          // сервер просто проверяет соединение, ничего не делаем
+        } else if (msg.type === 'init') {
           myId = msg.id;
           localStorage.setItem(SESSION_KEY, myId);
           players = msg.players;
