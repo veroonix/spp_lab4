@@ -7,6 +7,12 @@ const PORT = process.env.PORT || 8080;
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
 const CLIENT_DIR = path.join(__dirname, '..', 'client');
 
+// ---------- heartbeat / оффлайн-таймаут ----------
+// Пингуем клиентов каждые 30 секунд. Если на пинг нет ответа 10 секунд —
+// считаем соединение потерянным и помечаем игрока оффлайн.
+const HEARTBEAT_INTERVAL = 30000;
+const HEARTBEAT_TIMEOUT = 10000;
+
 const MAP = { w: 600, h: 400 };
 const PLAYER_SIZE = 20;
 const COOKIE_SIZE = 12;
@@ -33,7 +39,6 @@ function overlaps(a, b, sa, sb) {
          a.y < b.y + sb && a.y + sa > b.y;
 }
 
-// ---------- загрузка состояния ----------
 if (fs.existsSync(STATE_FILE)) {
   try {
     const loaded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
@@ -50,6 +55,17 @@ while (state.cookies.length < COOKIE_COUNT) spawnCookie();
 function saveState() {
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(state)); }
   catch (e) { console.error('Ошибка сохранения state:', e.message); }
+}
+
+// ---------- оффлайн-обработка ----------
+
+function setPlayerOffline(sessionId) {
+  if (!sessionId || !state.players[sessionId]) return;
+  state.players[sessionId].online = false;
+  state.players[sessionId].lastSeen = Date.now();
+  broadcast({ type: 'offline', id: sessionId });
+  saveState();
+  console.log(`Оффлайн: ${sessionId}`);
 }
 
 // ---------- HTTP-сервер (раздаёт статику) ----------
@@ -95,6 +111,23 @@ const httpServer = http.createServer((req, res) => {
 // ---------- WebSocket ----------
 const wss = new WebSocket.Server({ server: httpServer });
 
+// ---------- heartbeat-интервал (обнаружение потери соединения) ----------
+const heartbeatInterval = setInterval(() => {
+  const now = Date.now();
+  for (const ws of wss.clients) {
+    if (ws.readyState !== WebSocket.OPEN) continue;
+
+    // отправляем ping
+    ws.ping();
+
+    // если не было pong в течение HEARTBEAT_TIMEOUT — соединение мёртвое
+    if (!ws.isAlive || now - (ws.lastPong || 0) > HEARTBEAT_TIMEOUT) {
+      console.log(`Таймаут heartbeat, разрываем соединение (sessionId=${ws.sessionId || '?'})`);
+      ws.terminate();
+    }
+  }
+}, HEARTBEAT_INTERVAL);
+
 console.log('State file:', STATE_FILE);
 
 function broadcast(msg, except = null) {
@@ -105,54 +138,66 @@ function broadcast(msg, except = null) {
 }
 
 wss.on('connection', (ws) => {
-  let sessionId = null;
+  // инициализация отслеживания соединения
+  ws.isAlive = true;
+  ws.lastPong = Date.now();
+  ws.sessionId = null;
+
+  ws.on('pong', () => {
+    ws.isAlive = true;
+    ws.lastPong = Date.now();
+  });
 
   ws.on('message', (raw) => {
     let data;
     try { data = JSON.parse(raw); } catch { return; }
 
+    // обновляем метку активности при любом сообщении
+    ws.isAlive = true;
+    ws.lastPong = Date.now();
+
     if (data.type === 'hello') {
       if (data.sessionId && state.players[data.sessionId]) {
-        sessionId = data.sessionId;
-        state.players[sessionId].online = true;
-        state.players[sessionId].lastSeen = Date.now();
-        console.log(`Реконнект: ${sessionId}`);
+        ws.sessionId = data.sessionId;
+        state.players[ws.sessionId].online = true;
+        state.players[ws.sessionId].lastSeen = Date.now();
+        console.log(`Реконнект: ${ws.sessionId}`);
       } else {
-        sessionId = randomId();
-        state.players[sessionId] = {
+        ws.sessionId = randomId();
+        state.players[ws.sessionId] = {
           ...randomPos(PLAYER_SIZE),
           color: randomColor(),
           score: 0,
           online: true,
           lastSeen: Date.now()
         };
-        console.log(`Новый игрок: ${sessionId}`);
+        console.log(`Новый игрок: ${ws.sessionId}`);
       }
 
       ws.send(JSON.stringify({
         type: 'init',
-        id: sessionId,
+        id: ws.sessionId,
         players: state.players,
         cookies: state.cookies
       }));
 
-      broadcast({ type: 'join', id: sessionId, player: state.players[sessionId] }, ws);
+      broadcast({ type: 'join', id: ws.sessionId, player: state.players[ws.sessionId] }, ws);
       saveState();
       return;
     }
 
-    if (!sessionId || !state.players[sessionId]) return;
-    state.players[sessionId].lastSeen = Date.now();
+    if (!ws.sessionId || !state.players[ws.sessionId]) return;
+    state.players[ws.sessionId].lastSeen = Date.now();
 
     if (data.type === 'move') {
-      const p = state.players[sessionId];
+      const p = state.players[ws.sessionId];
 
       const nx = Math.max(0, Math.min(MAP.w - PLAYER_SIZE, p.x + data.dx));
       const ny = Math.max(0, Math.min(MAP.h - PLAYER_SIZE, p.y + data.dy));
 
       let blocked = false;
       for (const otherId in state.players) {
-        if (otherId === sessionId) continue;
+        if (otherId === ws.sessionId) continue;
         if (overlaps({ x: nx, y: ny }, state.players[otherId], PLAYER_SIZE, PLAYER_SIZE)) {
           blocked = true; break;
         }
@@ -166,7 +211,7 @@ wss.on('connection', (ws) => {
           state.cookies.splice(i, 1);
           p.score += 1;
           spawnCookie();
-          console.log(` ${sessionId} +балл, очки=${p.score}`);
+          console.log(` ${ws.sessionId} +балл, очки=${p.score}`);
         }
       }
 
@@ -176,21 +221,23 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (sessionId && state.players[sessionId]) {
-      state.players[sessionId].online = false;
-      state.players[sessionId].lastSeen = Date.now();
-      broadcast({ type: 'offline', id: sessionId });
-      saveState();
-      console.log(`Оффлайн: ${sessionId}`);
+    if (ws.sessionId && state.players[ws.sessionId]) {
+      setPlayerOffline(ws.sessionId);
     }
   });
 
-  ws.on('error', (e) => console.error('WS error:', e.message));
+  ws.on('error', (e) => {
+    console.error('WS error:', e.message);
+    if (ws.sessionId && state.players[ws.sessionId]) {
+      setPlayerOffline(ws.sessionId);
+    }
+  });
 });
 
 ['SIGTERM', 'SIGINT'].forEach(sig => {
   process.on(sig, () => {
     console.log(`${sig} — сохраняю состояние...`);
+    clearInterval(heartbeatInterval);
     saveState();
     wss.close(() => process.exit(0));
   });
