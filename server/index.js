@@ -8,10 +8,9 @@ const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
 const CLIENT_DIR = path.join(__dirname, '..', 'client');
 
 // ---------- heartbeat / оффлайн-таймаут ----------
-// Пингуем клиентов каждые 5 секунд. Если на пинг нет ответа 5 секунд —
-// считаем соединение потерянным и помечаем игрока оффлайн.
+// Пингуем клиентов каждые 5 секунд. Клиент обязан ответить pong (или прислать
+// любое сообщение) до следующего пинга — иначе соединение считается мёртвым.
 const HEARTBEAT_INTERVAL = 5000;
-const HEARTBEAT_TIMEOUT = 5000;
 
 // ---------- неактивность и серверный пинг ----------
 // Если игрок не присылал сообщений (move/hello) дольше этого — оффлайн для остальных.
@@ -45,12 +44,15 @@ function overlaps(a, b, sa, sb) {
          a.y < b.y + sb && a.y + sa > b.y;
 }
 
-// свободна ли точка для игрока (не пересекается ни с одним игроком, кроме ignoreId)
-function playerFree(x, y, ignoreId = null) {
+// свободна ли точка для игрока (не пересекается ни с одним игроком, кроме ignoreId).
+// onlineOnly=true — учитываем только онлайн-игроков (оффлайны проходимы)
+function playerFree(x, y, ignoreId = null, onlineOnly = false) {
   if (x < 0 || y < 0 || x + PLAYER_SIZE > MAP.w || y + PLAYER_SIZE > MAP.h) return false;
   for (const id in state.players) {
     if (id === ignoreId) continue;
-    if (overlaps({ x, y }, state.players[id], PLAYER_SIZE, PLAYER_SIZE)) return false;
+    const other = state.players[id];
+    if (onlineOnly && other.online === false) continue;
+    if (overlaps({ x, y }, other, PLAYER_SIZE, PLAYER_SIZE)) return false;
   }
   return true;
 }
@@ -171,18 +173,18 @@ const wss = new WebSocket.Server({ server: httpServer });
 
 // ---------- heartbeat-интервал (обнаружение потери соединения) ----------
 const heartbeatInterval = setInterval(() => {
-  const now = Date.now();
   for (const ws of wss.clients) {
     if (ws.readyState !== WebSocket.OPEN) continue;
 
-    // отправляем ping
-    ws.ping();
-
-    // если не было pong в течение HEARTBEAT_TIMEOUT — соединение мёртвое
-    if (!ws.isAlive || now - (ws.lastPong || 0) > HEARTBEAT_TIMEOUT) {
+    // на прошлый ping не пришёл pong и не было сообщений — соединение мёртвое
+    if (!ws.isAlive) {
       console.log(`Таймаут heartbeat, разрываем соединение (sessionId=${ws.sessionId || '?'})`);
       ws.terminate();
+      continue;
     }
+    // помечаем "нет ответа" и пингуем: pong или любое сообщение вернут isAlive=true
+    ws.isAlive = false;
+    ws.ping();
   }
 }, HEARTBEAT_INTERVAL);
 
@@ -227,12 +229,10 @@ function broadcast(msg, except = null) {
 wss.on('connection', (ws) => {
   // инициализация отслеживания соединения
   ws.isAlive = true;
-  ws.lastPong = Date.now();
   ws.sessionId = null;
 
   ws.on('pong', () => {
     ws.isAlive = true;
-    ws.lastPong = Date.now();
   });
 
   ws.on('message', (raw) => {
@@ -241,7 +241,6 @@ wss.on('connection', (ws) => {
 
     // обновляем метку активности при любом сообщении
     ws.isAlive = true;
-    ws.lastPong = Date.now();
 
     if (data.type === 'hello') {
       if (data.sessionId && state.players[data.sessionId]) {
@@ -286,6 +285,15 @@ wss.on('connection', (ws) => {
 
     if (data.type === 'move') {
       const p = state.players[ws.sessionId];
+
+      // на игрока могли "сесть", пока он был оффлайн (оффлайны не блокируют ход),
+      // а он стал онлайн без переподключения — и коллизия навсегда блокирует ему ходы.
+      // освобождаем: отодвигаем на ближайшую свободную точку и продолжаем ход
+      if (!playerFree(p.x, p.y, ws.sessionId, true)) {
+        const spot = findFreeSpot(p, ws.sessionId);
+        console.log(`Освобождение: ${ws.sessionId} (${p.x},${p.y}) → (${spot.x},${spot.y})`);
+        p.x = spot.x; p.y = spot.y;
+      }
 
       const nx = Math.max(0, Math.min(MAP.w - PLAYER_SIZE, p.x + data.dx));
       const ny = Math.max(0, Math.min(MAP.h - PLAYER_SIZE, p.y + data.dy));
