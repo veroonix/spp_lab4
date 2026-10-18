@@ -21,12 +21,12 @@ const SERVER_PING_INTERVAL = 15000;
 
 const MAP = { w: 600, h: 400 };
 const PLAYER_SIZE = 20;
-const COOKIE_SIZE = 12;
-const COOKIE_COUNT = 8;
+const COIN_SIZE = 12;
+const COIN_COUNT = 8;
 
 let state = {
   players: {},
-  cookies: []
+  coins: []
 };
 
 // ---------- утилиты ----------
@@ -36,8 +36,8 @@ const randomColor = () =>
 const randomId = () => Math.random().toString(36).substring(2, 11);
 const randomPos = (size) => ({ x: rnd(MAP.w - size), y: rnd(MAP.h - size) });
 
-function spawnCookie() {
-  state.cookies.push({ id: randomId(), ...randomPos(COOKIE_SIZE) });
+function spawnCoin() {
+  state.coins.push({ id: randomId(), ...randomPos(COIN_SIZE) });
 }
 
 function overlaps(a, b, sa, sb) {
@@ -45,18 +45,70 @@ function overlaps(a, b, sa, sb) {
          a.y < b.y + sb && a.y + sa > b.y;
 }
 
+// свободна ли точка для игрока (не пересекается ни с одним игроком, кроме ignoreId)
+function playerFree(x, y, ignoreId = null) {
+  if (x < 0 || y < 0 || x + PLAYER_SIZE > MAP.w || y + PLAYER_SIZE > MAP.h) return false;
+  for (const id in state.players) {
+    if (id === ignoreId) continue;
+    if (overlaps({ x, y }, state.players[id], PLAYER_SIZE, PLAYER_SIZE)) return false;
+  }
+  return true;
+}
+
+// Ищет ближайшую свободную точку, начиная с желаемой позиции (обход кольцами
+// по сетке с шагом PLAYER_SIZE). Возвращает желаемую позицию, если она свободна.
+function findFreeSpot(preferred, ignoreId = null) {
+  const px = Math.max(0, Math.min(MAP.w - PLAYER_SIZE, Math.round(preferred.x)));
+  const py = Math.max(0, Math.min(MAP.h - PLAYER_SIZE, Math.round(preferred.y)));
+
+  if (playerFree(px, py, ignoreId)) return { x: px, y: py };
+
+  const maxR = Math.ceil(Math.max(MAP.w, MAP.h) / PLAYER_SIZE);
+  for (let r = 1; r <= maxR; r++) {
+    for (let i = -r; i <= r; i++) {
+      const ring = [
+        [px + i * PLAYER_SIZE, py - r * PLAYER_SIZE],
+        [px + i * PLAYER_SIZE, py + r * PLAYER_SIZE],
+        [px - r * PLAYER_SIZE, py + i * PLAYER_SIZE],
+        [px + r * PLAYER_SIZE, py + i * PLAYER_SIZE]
+      ];
+      for (const [x, y] of ring) {
+        if (x < 0 || y < 0 || x + PLAYER_SIZE > MAP.w || y + PLAYER_SIZE > MAP.h) continue;
+        if (playerFree(x, y, ignoreId)) return { x, y };
+      }
+    }
+  }
+
+  // поле заполнено — пробуем случайные точки, иначе оставляем как есть
+  for (let i = 0; i < 100; i++) {
+    const p = randomPos(PLAYER_SIZE);
+    if (playerFree(p.x, p.y, ignoreId)) return p;
+  }
+  return { x: px, y: py };
+}
+
 if (fs.existsSync(STATE_FILE)) {
   try {
     const loaded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     state.players = loaded.players || {};
-    state.cookies = loaded.cookies || [];
+    state.coins = loaded.coins || [];
     for (const id in state.players) state.players[id].online = false;
-    console.log(`Загружено: ${Object.keys(state.players).length} игроков, ${state.cookies.length} печенек`);
+    console.log(`Загружено: ${Object.keys(state.players).length} игроков, ${state.coins.length} монеток`);
   } catch (e) {
     console.error('Ошибка загрузки state:', e.message);
   }
 }
-while (state.cookies.length < COOKIE_COUNT) spawnCookie();
+while (state.coins.length < COIN_COUNT) spawnCoin();
+
+// разрешаем пересечения, сохранённые в файле: отодвигаем на ближайшую свободную точку
+for (const id in state.players) {
+  const p = state.players[id];
+  const spot = findFreeSpot(p, id);
+  if (spot.x !== p.x || spot.y !== p.y) {
+    console.log(`Пересечение при загрузке: ${id} (${p.x},${p.y}) → (${spot.x},${spot.y})`);
+    p.x = spot.x; p.y = spot.y;
+  }
+}
 
 function saveState() {
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(state)); }
@@ -194,13 +246,20 @@ wss.on('connection', (ws) => {
     if (data.type === 'hello') {
       if (data.sessionId && state.players[data.sessionId]) {
         ws.sessionId = data.sessionId;
-        state.players[ws.sessionId].online = true;
-        state.players[ws.sessionId].lastSeen = Date.now();
+        const p = state.players[ws.sessionId];
+        // пока игрок был оффлайн, в его клетку мог зайти другой — отодвигаем рядом
+        if (!playerFree(p.x, p.y, ws.sessionId)) {
+          const spot = findFreeSpot(p, ws.sessionId);
+          console.log(`Пересечение при возвращении: ${ws.sessionId} (${p.x},${p.y}) → (${spot.x},${spot.y})`);
+          p.x = spot.x; p.y = spot.y;
+        }
+        p.online = true;
+        p.lastSeen = Date.now();
         console.log(`Реконнект: ${ws.sessionId}`);
       } else {
         ws.sessionId = randomId();
         state.players[ws.sessionId] = {
-          ...randomPos(PLAYER_SIZE),
+          ...findFreeSpot(randomPos(PLAYER_SIZE), ws.sessionId),
           color: randomColor(),
           score: 0,
           online: true,
@@ -213,7 +272,7 @@ wss.on('connection', (ws) => {
         type: 'init',
         id: ws.sessionId,
         players: state.players,
-        cookies: state.cookies
+        coins: state.coins
       }));
 
       broadcast({ type: 'join', id: ws.sessionId, player: state.players[ws.sessionId] }, ws);
@@ -244,17 +303,17 @@ wss.on('connection', (ws) => {
       if (!blocked) { p.x = nx; p.y = ny; }
 
       // атомарный захват монетки
-      for (let i = state.cookies.length - 1; i >= 0; i--) {
-        const c = state.cookies[i];
-        if (overlaps({ x: p.x, y: p.y }, c, PLAYER_SIZE, COOKIE_SIZE)) {
-          state.cookies.splice(i, 1);
+      for (let i = state.coins.length - 1; i >= 0; i--) {
+        const c = state.coins[i];
+        if (overlaps({ x: p.x, y: p.y }, c, PLAYER_SIZE, COIN_SIZE)) {
+          state.coins.splice(i, 1);
           p.score += 1;
-          spawnCookie();
+          spawnCoin();
           console.log(` ${ws.sessionId} +балл, очки=${p.score}`);
         }
       }
 
-      broadcast({ type: 'state', players: state.players, cookies: state.cookies });
+      broadcast({ type: 'state', players: state.players, coins: state.coins });
       saveState();
     }
   });

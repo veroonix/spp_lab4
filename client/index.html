@@ -57,12 +57,12 @@
     const canvas = document.getElementById('game');
     const ctx = canvas.getContext('2d');
     const SIZE = 20;
-    const COOKIE = 12;
+    const COIN = 12;
 
     let socket = null;
     let myId = null;
     let players = {};
-    let cookies = [];
+    let coins = [];
     let reconnectTimer = null;
     let offlineTimer = null;
     let isOnline = false;
@@ -134,11 +134,11 @@
           myId = msg.id;
           localStorage.setItem(SESSION_KEY, myId);
           players = msg.players;
-          cookies = msg.cookies;
+          coins = msg.coins || [];
           document.getElementById('me').textContent = myId;
         } else if (msg.type === 'state') {
           players = msg.players;
-          cookies = msg.cookies;
+          coins = msg.coins || [];
         } else if (msg.type === 'join') {
           players[msg.id] = msg.player;
         } else if (msg.type === 'offline') {
@@ -166,10 +166,10 @@
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       // монетки
-      for (const c of cookies) {
+      for (const c of coins) {
         ctx.fillStyle = '#e6b800';
         ctx.beginPath();
-        ctx.arc(c.x + COOKIE / 2, c.y + COOKIE / 2, COOKIE / 2, 0, Math.PI * 2);
+        ctx.arc(c.x + COIN / 2, c.y + COIN / 2, COIN / 2, 0, Math.PI * 2);
         ctx.fill();
       }
 
