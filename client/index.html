@@ -78,6 +78,17 @@
       statusEl.className = cls;
     }
 
+    // Плашка статуса. Красная — сервер считает нас оффлайном (мы молчим дольше
+    // таймаута неактивности: живы, но для других нас нет). Зелёная — мы онлайн.
+    // Потерю связи показываем отдельно — оранжевым «переподключение…».
+    function renderStatus() {
+      if (myId && players[myId] && players[myId].online === false) {
+        setStatus('оффлайн — нет активности', 'offline');
+      } else {
+        setStatus('онлайн', 'online');
+      }
+    }
+
     function setOnline(online) {
       if (isOnline === online) return;
       isOnline = online;
@@ -123,7 +134,6 @@
         // если были оффлайн, а пришло сообщение — снова онлайн
         if (!isOnline) {
           setOnline(true);
-          setStatus('онлайн', 'online');
         }
 
         const msg = JSON.parse(e.data);
@@ -147,6 +157,7 @@
 
         draw();
         renderScores();
+        renderStatus();
       };
 
       socket.onclose = () => {
