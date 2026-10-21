@@ -1,51 +1,43 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 8080;
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
-const CLIENT_DIR = path.join(__dirname, '..', 'client');
+const CLIENT_DIR = path.resolve(__dirname, '..', 'client');
 
-// ---------- heartbeat / оффлайн-таймаут ----------
-// Пингуем клиентов каждые 5 секунд. Клиент обязан ответить pong (или прислать
-// любое сообщение) до следующего пинга — иначе соединение считается мёртвым.
+// ---------- тайминги ----------
 const HEARTBEAT_INTERVAL = 5000;
-
-// ---------- неактивность и серверный пинг ----------
-// Если игрок не присылал сообщений (move/hello) дольше этого — оффлайн для остальных.
 const INACTIVITY_TIMEOUT = 60000;
-// Сервер шлёт ping всем клиентам, чтобы соединение не простаивало и клиент не думал, что пропал.
 const SERVER_PING_INTERVAL = 15000;
+
+// ---------- новые константы ----------
+const PLAYER_TTL_MS       = 24 * 60 * 60 * 1000;  
+const SAVE_DEBOUNCE_MS    = 500;                
+const MOVE_MIN_INTERVAL_MS = 20;                 
 
 const MAP = { w: 600, h: 400 };
 const PLAYER_SIZE = 20;
 const COIN_SIZE = 12;
 const COIN_COUNT = 8;
 
-let state = {
-  players: {},
-  coins: []
-};
+const MAX_STEP = PLAYER_SIZE;  
+
+let state = { players: {}, coins: [] };
 
 // ---------- утилиты ----------
-const rnd = (max) => Math.floor(Math.random() * max);
-const randomColor = () =>
-  '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0');
-const randomId = () => Math.random().toString(36).substring(2, 11);
+const rnd = (maxInclusive) => Math.floor(Math.random() * (maxInclusive + 1));
+const randomColor = () => '#' + Math.floor(Math.random() * 0x1000000).toString(16).padStart(6, '0');
+const randomId = () => crypto.randomBytes(8).toString('hex');
 const randomPos = (size) => ({ x: rnd(MAP.w - size), y: rnd(MAP.h - size) });
-
-function spawnCoin() {
-  state.coins.push({ id: randomId(), ...randomPos(COIN_SIZE) });
-}
 
 function overlaps(a, b, sa, sb) {
   return a.x < b.x + sb && a.x + sa > b.x &&
          a.y < b.y + sb && a.y + sa > b.y;
 }
 
-// свободна ли точка для игрока (не пересекается ни с одним игроком, кроме ignoreId).
-// onlineOnly=true — учитываем только онлайн-игроков (оффлайны проходимы)
 function playerFree(x, y, ignoreId = null, onlineOnly = false) {
   if (x < 0 || y < 0 || x + PLAYER_SIZE > MAP.w || y + PLAYER_SIZE > MAP.h) return false;
   for (const id in state.players) {
@@ -57,12 +49,9 @@ function playerFree(x, y, ignoreId = null, onlineOnly = false) {
   return true;
 }
 
-// Ищет ближайшую свободную точку, начиная с желаемой позиции (обход кольцами
-// по сетке с шагом PLAYER_SIZE). Возвращает желаемую позицию, если она свободна.
 function findFreeSpot(preferred, ignoreId = null) {
   const px = Math.max(0, Math.min(MAP.w - PLAYER_SIZE, Math.round(preferred.x)));
   const py = Math.max(0, Math.min(MAP.h - PLAYER_SIZE, Math.round(preferred.y)));
-
   if (playerFree(px, py, ignoreId)) return { x: px, y: py };
 
   const maxR = Math.ceil(Math.max(MAP.w, MAP.h) / PLAYER_SIZE);
@@ -80,8 +69,6 @@ function findFreeSpot(preferred, ignoreId = null) {
       }
     }
   }
-
-  // поле заполнено — пробуем случайные точки, иначе оставляем как есть
   for (let i = 0; i < 100; i++) {
     const p = randomPos(PLAYER_SIZE);
     if (playerFree(p.x, p.y, ignoreId)) return p;
@@ -89,20 +76,65 @@ function findFreeSpot(preferred, ignoreId = null) {
   return { x: px, y: py };
 }
 
+function spawnCoin() {
+  for (let i = 0; i < 50; i++) {
+    const pos = randomPos(COIN_SIZE);
+    let ok = true;
+    for (const id in state.players) {
+      const pl = state.players[id];
+      if (pl.online === false) continue;
+      if (overlaps(pos, pl, COIN_SIZE, PLAYER_SIZE)) { ok = false; break; }
+    }
+    if (ok) { state.coins.push({ id: randomId(), ...pos }); return; }
+  }
+  state.coins.push({ id: randomId(), ...randomPos(COIN_SIZE) });
+}
+
+// ---------- persist: атомарная запись + дебаунс ----------
+let saveTimer = null;
+let saveDirty = false;
+
+function scheduleSave() {
+  saveDirty = true;
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    if (saveDirty) { saveDirty = false; doSave(); }
+  }, SAVE_DEBOUNCE_MS);
+}
+
+function doSave() {
+  try {
+    const tmp = STATE_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(state));
+    fs.renameSync(tmp, STATE_FILE);   // атомарная замена
+  } catch (e) {
+    console.error('Ошибка сохранения state:', e.message);
+  }
+}
+
+function saveNow() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  if (saveDirty) { saveDirty = false; doSave(); }
+}
+
+// ---------- загрузка ----------
 if (fs.existsSync(STATE_FILE)) {
   try {
     const loaded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     state.players = loaded.players || {};
-    state.coins = loaded.coins || [];
-    for (const id in state.players) state.players[id].online = false;
+    state.coins   = loaded.coins   || [];
+    const now = Date.now();
+    for (const id in state.players) {
+      state.players[id].online = false;
+      state.players[id].offlineAt = now;
+    }
     console.log(`Загружено: ${Object.keys(state.players).length} игроков, ${state.coins.length} монеток`);
   } catch (e) {
     console.error('Ошибка загрузки state:', e.message);
   }
 }
 while (state.coins.length < COIN_COUNT) spawnCoin();
-
-// разрешаем пересечения, сохранённые в файле: отодвигаем на ближайшую свободную точку
 for (const id in state.players) {
   const p = state.players[id];
   const spot = findFreeSpot(p, id);
@@ -111,24 +143,21 @@ for (const id in state.players) {
     p.x = spot.x; p.y = spot.y;
   }
 }
+doSave();   
 
-function saveState() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state)); }
-  catch (e) { console.error('Ошибка сохранения state:', e.message); }
-}
-
-// ---------- оффлайн-обработка ----------
-
+// ---------- оффлайн ----------
 function setPlayerOffline(sessionId) {
   if (!sessionId || !state.players[sessionId]) return;
-  state.players[sessionId].online = false;
-  state.players[sessionId].lastSeen = Date.now();
+  const p = state.players[sessionId];
+  if (p.online === false) return;   
+  p.online = false;
+  p.offlineAt = Date.now();
   broadcast({ type: 'offline', id: sessionId });
-  saveState();
+  scheduleSave();
   console.log(`Оффлайн: ${sessionId}`);
 }
 
-// ---------- HTTP-сервер (раздаёт статику) ----------
+// ---------- HTTP ----------
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js':   'application/javascript; charset=utf-8',
@@ -141,18 +170,17 @@ const MIME = {
 };
 
 const httpServer = http.createServer((req, res) => {
-  // health-check для Render
   if (req.url === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end('ok');
   }
 
-  const urlPath = req.url.split('?')[0];
+  const urlPath = (req.url || '/').split('?')[0];
   const relPath = urlPath === '/' ? '/index.html' : urlPath;
-  const fullPath = path.join(CLIENT_DIR, relPath);
+  const fullPath = path.resolve(CLIENT_DIR, '.' + relPath);
+  const rel = path.relative(CLIENT_DIR, fullPath);
 
-  // защита от path traversal
-  if (!fullPath.startsWith(CLIENT_DIR)) {
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
     res.writeHead(403);
     return res.end('Forbidden');
   }
@@ -168,56 +196,8 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
-// ---------- WebSocket ----------
+// ---------- WS ----------
 const wss = new WebSocket.Server({ server: httpServer });
-
-// ---------- heartbeat-интервал (обнаружение потери соединения) ----------
-const heartbeatInterval = setInterval(() => {
-  for (const ws of wss.clients) {
-    if (ws.readyState !== WebSocket.OPEN) continue;
-
-    // на прошлый ping не пришёл pong и не было сообщений — соединение мёртвое
-    if (!ws.isAlive) {
-      console.log(`Таймаут heartbeat, разрываем соединение (sessionId=${ws.sessionId || '?'})`);
-      ws.terminate();
-      continue;
-    }
-    // помечаем "нет ответа" и пингуем: pong или любое сообщение вернут isAlive=true
-    ws.isAlive = false;
-    ws.ping();
-  }
-}, HEARTBEAT_INTERVAL);
-
-// ---------- серверный пинг клиентам (чтобы не простаивало соединение) ----------
-const serverPingInterval = setInterval(() => {
-  broadcast({ type: 'ping' });
-}, SERVER_PING_INTERVAL);
-
-// ---------- проверка неактивности игроков ----------
-const inactivityInterval = setInterval(() => {
-  const now = Date.now();
-  for (const id in state.players) {
-    const p = state.players[id];
-    if (p.online && now - p.lastSeen > INACTIVITY_TIMEOUT) {
-      p.online = false;
-      p.lastSeen = now;
-      broadcast({ type: 'offline', id });
-      saveState();
-      console.log(`Неактивен: ${id}`);
-    }
-  }
-}, 10000);
-
-// очищаем интервалы при завершении процесса
-['SIGTERM', 'SIGINT'].forEach((sig) => {
-  process.on(sig, () => {
-    clearInterval(heartbeatInterval);
-    clearInterval(serverPingInterval);
-    clearInterval(inactivityInterval);
-  });
-});
-
-console.log('State file:', STATE_FILE);
 
 function broadcast(msg, except = null) {
   const str = JSON.stringify(msg);
@@ -226,33 +206,98 @@ function broadcast(msg, except = null) {
   }
 }
 
+// ---------- heartbeat ----------
+const heartbeatInterval = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.readyState !== WebSocket.OPEN) continue;
+    if (!ws.isAlive) {
+      console.log(`Таймаут heartbeat (sessionId=${ws.sessionId || '?'})`);
+      ws.terminate();
+      continue;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, HEARTBEAT_INTERVAL);
+
+// ---------- серверный ping ----------
+const serverPingInterval = setInterval(() => {
+  broadcast({ type: 'ping' });
+}, SERVER_PING_INTERVAL);
+
+// ---------- неактивность ----------
+const inactivityInterval = setInterval(() => {
+  const now = Date.now();
+  for (const id in state.players) {
+    const p = state.players[id];
+    if (p.online && now - p.lastSeen > INACTIVITY_TIMEOUT) {
+      setPlayerOffline(id);
+    }
+  }
+}, 10000);
+
+// ---------- очистка мёртвых записей ----------
+const cleanupInterval = setInterval(() => {
+  const now = Date.now();
+  let removed = 0;
+  for (const id in state.players) {
+    const p = state.players[id];
+    if (p.online === false && p.offlineAt && now - p.offlineAt > PLAYER_TTL_MS) {
+      let hasSocket = false;
+      for (const c of wss.clients) {
+        if (c.sessionId === id && c.readyState === WebSocket.OPEN) { hasSocket = true; break; }
+      }
+      if (!hasSocket) { delete state.players[id]; removed++; }
+    }
+  }
+  if (removed) {
+    console.log(`Очищено записей: ${removed}`);
+    scheduleSave();
+  }
+}, 60 * 60 * 1000);
+
+// ---------- shutdown ----------
+['SIGTERM', 'SIGINT'].forEach((sig) => {
+  process.on(sig, () => {
+    console.log(`${sig} — сохраняю и закрываю...`);
+    clearInterval(heartbeatInterval);
+    clearInterval(serverPingInterval);
+    clearInterval(inactivityInterval);
+    clearInterval(cleanupInterval);
+    saveNow();
+    wss.close(() => {
+      httpServer.close(() => process.exit(0));
+    });
+    setTimeout(() => process.exit(0), 3000).unref();
+  });
+});
+
+// ---------- подключение ----------
 wss.on('connection', (ws) => {
-  // инициализация отслеживания соединения
   ws.isAlive = true;
   ws.sessionId = null;
+  ws.lastMoveAt = 0;
 
-  ws.on('pong', () => {
-    ws.isAlive = true;
-  });
+  ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
     let data;
     try { data = JSON.parse(raw); } catch { return; }
-
-    // обновляем метку активности при любом сообщении
     ws.isAlive = true;
 
     if (data.type === 'hello') {
-      if (data.sessionId && state.players[data.sessionId]) {
+      const known = typeof data.sessionId === 'string' && data.sessionId && state.players[data.sessionId];
+
+      if (known) {
         ws.sessionId = data.sessionId;
         const p = state.players[ws.sessionId];
-        // пока игрок был оффлайн, в его клетку мог зайти другой — отодвигаем рядом
         if (!playerFree(p.x, p.y, ws.sessionId)) {
           const spot = findFreeSpot(p, ws.sessionId);
           console.log(`Пересечение при возвращении: ${ws.sessionId} (${p.x},${p.y}) → (${spot.x},${spot.y})`);
           p.x = spot.x; p.y = spot.y;
         }
         p.online = true;
+        p.offlineAt = null;
         p.lastSeen = Date.now();
         console.log(`Реконнект: ${ws.sessionId}`);
       } else {
@@ -262,7 +307,8 @@ wss.on('connection', (ws) => {
           color: randomColor(),
           score: 0,
           online: true,
-          lastSeen: Date.now()
+          lastSeen: Date.now(),
+          offlineAt: null
         };
         console.log(`Новый игрок: ${ws.sessionId}`);
       }
@@ -275,80 +321,86 @@ wss.on('connection', (ws) => {
       }));
 
       broadcast({ type: 'join', id: ws.sessionId, player: state.players[ws.sessionId] }, ws);
-      saveState();
+      scheduleSave();
       return;
     }
 
     if (!ws.sessionId || !state.players[ws.sessionId]) return;
-    state.players[ws.sessionId].lastSeen = Date.now();
-    state.players[ws.sessionId].online = true;
+    const me = state.players[ws.sessionId];
+    me.lastSeen = Date.now();
+    if (me.online === false) {
+      me.online = true;
+      me.offlineAt = null;
+    }
 
     if (data.type === 'move') {
-      const p = state.players[ws.sessionId];
+      // анти-спам
+      const now = Date.now();
+      if (now - ws.lastMoveAt < MOVE_MIN_INTERVAL_MS) return;
+      ws.lastMoveAt = now;
 
-      // на игрока могли "сесть", пока он был оффлайн (оффлайны не блокируют ход),
-      // а он стал онлайн без переподключения — и коллизия навсегда блокирует ему ходы.
-      // освобождаем: отодвигаем на ближайшую свободную точку и продолжаем ход
-      if (!playerFree(p.x, p.y, ws.sessionId, true)) {
-        const spot = findFreeSpot(p, ws.sessionId);
-        console.log(`Освобождение: ${ws.sessionId} (${p.x},${p.y}) → (${spot.x},${spot.y})`);
-        p.x = spot.x; p.y = spot.y;
+      // санитизация текущей позиции
+      if (!playerFree(me.x, me.y, ws.sessionId, true)) {
+        const spot = findFreeSpot(me, ws.sessionId);
+        console.log(`Освобождение: ${ws.sessionId} (${me.x},${me.y}) → (${spot.x},${spot.y})`);
+        me.x = spot.x; me.y = spot.y;
       }
 
-      const nx = Math.max(0, Math.min(MAP.w - PLAYER_SIZE, p.x + data.dx));
-      const ny = Math.max(0, Math.min(MAP.h - PLAYER_SIZE, p.y + data.dy));
+      // валидация ввода
+      const rawDx = Number(data.dx);
+      const rawDy = Number(data.dy);
+      const sdx = Number.isFinite(rawDx) ? Math.max(-MAX_STEP, Math.min(MAX_STEP, Math.trunc(rawDx))) : 0;
+      const sdy = Number.isFinite(rawDy) ? Math.max(-MAX_STEP, Math.min(MAX_STEP, Math.trunc(rawDy))) : 0;
 
-      let blocked = false;
-      for (const otherId in state.players) {
-        if (otherId === ws.sessionId) continue;
-        const other = state.players[otherId];
-        // сквозные оффлайн-игроки — не блокируют движение
-        if (other.online === false) continue;
-        if (overlaps({ x: nx, y: ny }, other, PLAYER_SIZE, PLAYER_SIZE)) {
-          blocked = true; break;
+      const nx = Math.max(0, Math.min(MAP.w - PLAYER_SIZE, me.x + sdx));
+      const ny = Math.max(0, Math.min(MAP.h - PLAYER_SIZE, me.y + sdy));
+
+      const isFree = (x, y) => {
+        for (const otherId in state.players) {
+          if (otherId === ws.sessionId) continue;
+          const other = state.players[otherId];
+          if (other.online === false) continue;
+          if (overlaps({ x, y }, other, PLAYER_SIZE, PLAYER_SIZE)) return false;
         }
-      }
-      if (!blocked) { p.x = nx; p.y = ny; }
+        return true;
+      };
 
-      // атомарный захват монетки
+      // axis-sliding: сначала пробуем целиком, потом по одной оси
+      if (isFree(nx, ny)) {
+        me.x = nx; me.y = ny;
+      } else if (sdx !== 0 && isFree(nx, me.y)) {
+        me.x = nx;
+      } else if (sdy !== 0 && isFree(me.x, ny)) {
+        me.y = ny;
+      }
+
+      // сбор монет
       for (let i = state.coins.length - 1; i >= 0; i--) {
         const c = state.coins[i];
-        if (overlaps({ x: p.x, y: p.y }, c, PLAYER_SIZE, COIN_SIZE)) {
+        if (overlaps({ x: me.x, y: me.y }, c, PLAYER_SIZE, COIN_SIZE)) {
           state.coins.splice(i, 1);
-          p.score += 1;
+          me.score += 1;
           spawnCoin();
-          console.log(` ${ws.sessionId} +балл, очки=${p.score}`);
+          console.log(` ${ws.sessionId} +балл, очки=${me.score}`);
         }
       }
 
       broadcast({ type: 'state', players: state.players, coins: state.coins });
-      saveState();
+      scheduleSave();
     }
   });
 
   ws.on('close', () => {
-    if (ws.sessionId && state.players[ws.sessionId]) {
-      setPlayerOffline(ws.sessionId);
-    }
+    if (ws.sessionId && state.players[ws.sessionId]) setPlayerOffline(ws.sessionId);
   });
 
   ws.on('error', (e) => {
     console.error('WS error:', e.message);
-    if (ws.sessionId && state.players[ws.sessionId]) {
-      setPlayerOffline(ws.sessionId);
-    }
-  });
-});
-
-['SIGTERM', 'SIGINT'].forEach(sig => {
-  process.on(sig, () => {
-    console.log(`${sig} — сохраняю состояние...`);
-    clearInterval(heartbeatInterval);
-    saveState();
-    wss.close(() => process.exit(0));
+    if (ws.sessionId && state.players[ws.sessionId]) setPlayerOffline(ws.sessionId);
   });
 });
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Сервер запущен на порту ${PORT}`);
+  console.log('State file:', STATE_FILE);
 });

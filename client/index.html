@@ -59,6 +59,11 @@
     const SIZE = 20;
     const COIN = 12;
 
+    const SESSION_KEY = 'lab4-session-id';
+    const OFFLINE_TIMEOUT = 30000;
+    const RECONNECT_DELAY = 1500;
+    const MOVE_MIN_INTERVAL_MS = 20;
+
     let socket = null;
     let myId = null;
     let players = {};
@@ -66,31 +71,33 @@
     let reconnectTimer = null;
     let offlineTimer = null;
     let isOnline = false;
-
-    const SESSION_KEY = 'lab4-session-id';
-    const OFFLINE_TIMEOUT = 30000;
+    let lastMoveSentAt = 0;
 
     const statusEl = document.getElementById('status');
     const bannerEl = document.getElementById('offline-banner');
+    const scoresEl = document.getElementById('scores');
+    const meEl = document.getElementById('me');
+    const scoreEl = document.getElementById('score');
+
+    // ===== статус =====
 
     function setStatus(text, cls) {
       statusEl.textContent = text;
-      statusEl.className = cls;
+      statusEl.classList.remove('online', 'offline', 'reconnecting');
+      if (cls) statusEl.classList.add(cls);
     }
 
-    // Плашка статуса. Красная — сервер считает нас оффлайном (мы молчим дольше
-    // таймаута неактивности: живы, но для других нас нет). Зелёная — мы онлайн.
-    // Потерю связи показываем отдельно — оранжевым «переподключение…».
     function renderStatus() {
-      if (myId && players[myId] && players[myId].online === false) {
+      // fix #6: если записи нет — не врём «онлайн»
+      if (myId && (!players[myId] || players[myId].online === false)) {
         setStatus('оффлайн — нет активности', 'offline');
       } else {
         setStatus('онлайн', 'online');
       }
     }
 
+    
     function setOnline(online) {
-      if (isOnline === online) return;
       isOnline = online;
       document.body.classList.toggle('offline', !online);
       bannerEl.style.display = online ? 'none' : 'block';
@@ -108,46 +115,60 @@
         setOnline(false);
         setStatus('оффлайн — нет ответа от сервера', 'reconnecting');
         if (socket) socket.close();
-        // onclose сам назначит повторное подключение
       }, OFFLINE_TIMEOUT);
     }
 
-    // ===== Подключение + авто-реконнект =====
+    function scheduleReconnect(delay = RECONNECT_DELAY) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, delay);
+    }
+
+    // ===== подключение + авто-реконнект =====
     function connect() {
       clearTimeout(reconnectTimer);
+      reconnectTimer = null;
 
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      socket = new WebSocket(`${protocol}//${location.host}/ws`);
+      const ws = new WebSocket(`${protocol}//${location.host}/ws`);
+      socket = ws;
 
-      socket.onopen = () => {
+      ws.onopen = () => {
+        if (ws !== socket) return;
         setOnline(true);
         setStatus('онлайн', 'online');
-        const saved = localStorage.getItem(SESSION_KEY);
-        socket.send(JSON.stringify({ type: 'hello', sessionId: saved }));
+        let saved = null;
+        try { saved = localStorage.getItem(SESSION_KEY); } catch {}
+        ws.send(JSON.stringify({ type: 'hello', sessionId: saved }));
       };
 
-      socket.onmessage = (e) => {
-        // сбрасываем оффлайн-таймер при любом сообщении от сервера
+      ws.onmessage = (e) => {
+        if (ws !== socket) return;              // fix #2: игнорируем устаревший сокет
+
+        // сброс offline-таймера при любом сообщении
         clearTimeout(offlineTimer);
         startOfflineTimer();
 
-        // если были оффлайн, а пришло сообщение — снова онлайн
-        if (!isOnline) {
-          setOnline(true);
-        }
+        // fix #1: битый JSON не обрушит обработчик
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
 
-        const msg = JSON.parse(e.data);
+        if (!isOnline) setOnline(true);
 
         if (msg.type === 'ping') {
-          // сервер просто проверяет соединение, ничего не делаем
-        } else if (msg.type === 'init') {
+          // fix #7: на ping не перерисовываем всё — только статус
+          renderStatus();
+          return;
+        }
+
+        if (msg.type === 'init') {
           myId = msg.id;
-          localStorage.setItem(SESSION_KEY, myId);
-          players = msg.players;
+          // fix #10: setItem может бросить QuotaExceededError
+          try { localStorage.setItem(SESSION_KEY, myId); } catch {}
+          players = msg.players || {};
           coins = msg.coins || [];
-          document.getElementById('me').textContent = myId;
+          meEl.textContent = myId;
         } else if (msg.type === 'state') {
-          players = msg.players;
+          players = msg.players || {};
           coins = msg.coins || [];
         } else if (msg.type === 'join') {
           players[msg.id] = msg.player;
@@ -160,23 +181,24 @@
         renderStatus();
       };
 
-      socket.onclose = () => {
+      ws.onclose = () => {
+        if (ws !== socket) return;             
         setOnline(false);
         setStatus('оффлайн — переподключение…', 'reconnecting');
-        reconnectTimer = setTimeout(connect, 1500);
+        scheduleReconnect();                    
       };
 
-      socket.onerror = () => {
+      ws.onerror = () => {
+        if (ws !== socket) return;
         setOnline(false);
-        socket.close();
+        try { ws.close(); } catch {}
       };
     }
 
-    // ===== Отрисовка =====
+    // ===== отрисовка =====
     function draw() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // монетки
       for (const c of coins) {
         ctx.fillStyle = '#e6b800';
         ctx.beginPath();
@@ -184,7 +206,6 @@
         ctx.fill();
       }
 
-      // игроки
       for (const id in players) {
         const p = players[id];
         ctx.globalAlpha = p.online === false ? 0.35 : 1;
@@ -201,10 +222,9 @@
     }
 
     function renderScores() {
-      const el = document.getElementById('scores');
       const sorted = Object.entries(players).sort((a, b) => b[1].score - a[1].score);
 
-      el.innerHTML = sorted.map(([id, p]) => {
+      scoresEl.innerHTML = sorted.map(([id, p]) => {
         const cls = [id === myId ? 'me' : '', p.online === false ? 'dead' : ''].join(' ');
         const mark = id === myId ? '★' : '•';
         const status = p.online === false ? ' (оффлайн)' : '';
@@ -212,11 +232,11 @@
       }).join('');
 
       if (myId && players[myId]) {
-        document.getElementById('score').textContent = players[myId].score;
+        scoreEl.textContent = players[myId].score;
       }
     }
 
-    // ===== Управление =====
+    // ===== управление =====
     window.addEventListener('keydown', (e) => {
       const moves = {
         ArrowUp: [0, -10], ArrowDown: [0, 10],
@@ -229,17 +249,21 @@
       if (!m) return;
 
       e.preventDefault();
-      if (socket && socket.readyState === WebSocket.OPEN && isOnline) {
-        socket.send(JSON.stringify({ type: 'move', dx: m[0], dy: m[1] }));
-      }
+      if (!socket || socket.readyState !== WebSocket.OPEN || !isOnline) return;
+
+      const now = Date.now();
+      if (now - lastMoveSentAt < MOVE_MIN_INTERVAL_MS) return;
+      lastMoveSentAt = now;
+
+      socket.send(JSON.stringify({ type: 'move', dx: m[0], dy: m[1] }));
     });
 
     connect();
 
-    // При возврате на вкладку — если давно не было сообщений, форсируем реконнект
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && socket && socket.readyState === WebSocket.OPEN && !isOnline) {
-        setTimeout(connect, 500);
+      if (document.hidden) return;
+      if (socket && socket.readyState === WebSocket.OPEN && !isOnline) {
+        scheduleReconnect(500);
       }
     });
   </script>
