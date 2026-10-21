@@ -88,7 +88,6 @@
     }
 
     function renderStatus() {
-      // fix #6: если записи нет — не врём «онлайн»
       if (myId && (!players[myId] || players[myId].online === false)) {
         setStatus('оффлайн — нет активности', 'offline');
       } else {
@@ -142,27 +141,22 @@
       };
 
       ws.onmessage = (e) => {
-        if (ws !== socket) return;              // fix #2: игнорируем устаревший сокет
-
-        // сброс offline-таймера при любом сообщении
+        if (ws !== socket) return;            
         clearTimeout(offlineTimer);
         startOfflineTimer();
 
-        // fix #1: битый JSON не обрушит обработчик
         let msg;
         try { msg = JSON.parse(e.data); } catch { return; }
 
         if (!isOnline) setOnline(true);
 
         if (msg.type === 'ping') {
-          // fix #7: на ping не перерисовываем всё — только статус
           renderStatus();
           return;
         }
 
         if (msg.type === 'init') {
           myId = msg.id;
-          // fix #10: setItem может бросить QuotaExceededError
           try { localStorage.setItem(SESSION_KEY, myId); } catch {}
           players = msg.players || {};
           coins = msg.coins || [];
