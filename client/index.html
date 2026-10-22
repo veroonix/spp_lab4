@@ -56,13 +56,19 @@
   <script>
     const canvas = document.getElementById('game');
     const ctx = canvas.getContext('2d');
-    const SIZE = 20;
-    const COIN = 12;
+
+    // Значения по умолчанию — на случай, если init ещё не пришёл.
+    // Реальные значения придут с сервера в msg.config и перезапишут их.
+    let CFG = {
+      MAP: { w: 600, h: 400 },
+      PLAYER_SIZE: 20,
+      COIN_SIZE: 12,
+      MOVE_MIN_INTERVAL_MS: 20
+    };
 
     const SESSION_KEY = 'lab4-session-id';
     const OFFLINE_TIMEOUT = 30000;
     const RECONNECT_DELAY = 1500;
-    const MOVE_MIN_INTERVAL_MS = 20;
 
     let socket = null;
     let myId = null;
@@ -80,7 +86,6 @@
     const scoreEl = document.getElementById('score');
 
     // ===== статус =====
-
     function setStatus(text, cls) {
       statusEl.textContent = text;
       statusEl.classList.remove('online', 'offline', 'reconnecting');
@@ -95,7 +100,6 @@
       }
     }
 
-    
     function setOnline(online) {
       isOnline = online;
       document.body.classList.toggle('offline', !online);
@@ -141,7 +145,7 @@
       };
 
       ws.onmessage = (e) => {
-        if (ws !== socket) return;            
+        if (ws !== socket) return;
         clearTimeout(offlineTimer);
         startOfflineTimer();
 
@@ -158,11 +162,19 @@
         if (msg.type === 'init') {
           myId = msg.id;
           try { localStorage.setItem(SESSION_KEY, myId); } catch {}
+
+          // ← единый контракт: размеры мира берём у сервера
+          if (msg.config) {
+            CFG = msg.config;
+            canvas.width  = CFG.MAP.w;
+            canvas.height = CFG.MAP.h;
+          }
           players = msg.players || {};
           coins = msg.coins || [];
           meEl.textContent = myId;
         } else if (msg.type === 'state') {
           players = msg.players || {};
+          coins = msg.coins || {};
           coins = msg.coins || [];
         } else if (msg.type === 'join') {
           players[msg.id] = msg.player;
@@ -176,10 +188,10 @@
       };
 
       ws.onclose = () => {
-        if (ws !== socket) return;             
+        if (ws !== socket) return;
         setOnline(false);
         setStatus('оффлайн — переподключение…', 'reconnecting');
-        scheduleReconnect();                    
+        scheduleReconnect();
       };
 
       ws.onerror = () => {
@@ -192,11 +204,13 @@
     // ===== отрисовка =====
     function draw() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const S = CFG.PLAYER_SIZE;
+      const C = CFG.COIN_SIZE;
 
       for (const c of coins) {
         ctx.fillStyle = '#e6b800';
         ctx.beginPath();
-        ctx.arc(c.x + COIN / 2, c.y + COIN / 2, COIN / 2, 0, Math.PI * 2);
+        ctx.arc(c.x + C / 2, c.y + C / 2, C / 2, 0, Math.PI * 2);
         ctx.fill();
       }
 
@@ -204,12 +218,12 @@
         const p = players[id];
         ctx.globalAlpha = p.online === false ? 0.35 : 1;
         ctx.fillStyle = p.color;
-        ctx.fillRect(p.x, p.y, SIZE, SIZE);
+        ctx.fillRect(p.x, p.y, S, S);
 
         if (id === myId) {
           ctx.strokeStyle = '#000';
           ctx.lineWidth = 2;
-          ctx.strokeRect(p.x, p.y, SIZE, SIZE);
+          ctx.strokeRect(p.x, p.y, S, S);
         }
       }
       ctx.globalAlpha = 1;
@@ -246,7 +260,7 @@
       if (!socket || socket.readyState !== WebSocket.OPEN || !isOnline) return;
 
       const now = Date.now();
-      if (now - lastMoveSentAt < MOVE_MIN_INTERVAL_MS) return;
+      if (now - lastMoveSentAt < CFG.MOVE_MIN_INTERVAL_MS) return;
       lastMoveSentAt = now;
 
       socket.send(JSON.stringify({ type: 'move', dx: m[0], dy: m[1] }));

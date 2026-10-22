@@ -4,26 +4,18 @@ const path = require('path');
 const crypto = require('crypto');
 const WebSocket = require('ws');
 
+// ---------- конфигурация ----------
+const CFG = require(path.join(__dirname, '..', 'config.json'));
+
 const PORT = process.env.PORT || 8080;
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
 const CLIENT_DIR = path.resolve(__dirname, '..', 'client');
 
-// ---------- тайминги ----------
-const HEARTBEAT_INTERVAL = 5000;
-const INACTIVITY_TIMEOUT = 60000;
-const SERVER_PING_INTERVAL = 15000;
-
-// ---------- новые константы ----------
-const PLAYER_TTL_MS       = 24 * 60 * 60 * 1000;  
-const SAVE_DEBOUNCE_MS    = 500;                
-const MOVE_MIN_INTERVAL_MS = 20;                 
-
-const MAP = { w: 600, h: 400 };
-const PLAYER_SIZE = 20;
-const COIN_SIZE = 12;
-const COIN_COUNT = 8;
-
-const MAX_STEP = PLAYER_SIZE;  
+const {
+  MAP, PLAYER_SIZE, COIN_SIZE, COIN_COUNT, MAX_STEP,
+  HEARTBEAT_INTERVAL, INACTIVITY_TIMEOUT, SERVER_PING_INTERVAL,
+  PLAYER_TTL_MS, SAVE_DEBOUNCE_MS, MOVE_MIN_INTERVAL_MS
+} = CFG;
 
 let state = { players: {}, coins: [] };
 
@@ -38,12 +30,13 @@ function overlaps(a, b, sa, sb) {
          a.y < b.y + sb && a.y + sa > b.y;
 }
 
-function playerFree(x, y, ignoreId = null, onlineOnly = false) {
+// ignoreOffline: true — призраки не считаются препятствием
+function playerFree(x, y, ignoreId = null, ignoreOffline = false) {
   if (x < 0 || y < 0 || x + PLAYER_SIZE > MAP.w || y + PLAYER_SIZE > MAP.h) return false;
   for (const id in state.players) {
     if (id === ignoreId) continue;
     const other = state.players[id];
-    if (onlineOnly && other.online === false) continue;
+    if (ignoreOffline && other.online === false) continue;
     if (overlaps({ x, y }, other, PLAYER_SIZE, PLAYER_SIZE)) return false;
   }
   return true;
@@ -90,7 +83,7 @@ function spawnCoin() {
   state.coins.push({ id: randomId(), ...randomPos(COIN_SIZE) });
 }
 
-// ---------- persist: атомарная запись + дебаунс ----------
+// ---------- persist ----------
 let saveTimer = null;
 let saveDirty = false;
 
@@ -107,7 +100,7 @@ function doSave() {
   try {
     const tmp = STATE_FILE + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(state));
-    fs.renameSync(tmp, STATE_FILE);   // атомарная замена
+    fs.renameSync(tmp, STATE_FILE);
   } catch (e) {
     console.error('Ошибка сохранения state:', e.message);
   }
@@ -134,7 +127,9 @@ if (fs.existsSync(STATE_FILE)) {
     console.error('Ошибка загрузки state:', e.message);
   }
 }
+
 while (state.coins.length < COIN_COUNT) spawnCoin();
+
 for (const id in state.players) {
   const p = state.players[id];
   const spot = findFreeSpot(p, id);
@@ -143,13 +138,13 @@ for (const id in state.players) {
     p.x = spot.x; p.y = spot.y;
   }
 }
-doSave();   
+doSave();
 
 // ---------- оффлайн ----------
 function setPlayerOffline(sessionId) {
   if (!sessionId || !state.players[sessionId]) return;
   const p = state.players[sessionId];
-  if (p.online === false) return;   
+  if (p.online === false) return;
   p.online = false;
   p.offlineAt = Date.now();
   broadcast({ type: 'offline', id: sessionId });
@@ -316,6 +311,12 @@ wss.on('connection', (ws) => {
       ws.send(JSON.stringify({
         type: 'init',
         id: ws.sessionId,
+        config: {
+          MAP,
+          PLAYER_SIZE,
+          COIN_SIZE,
+          MOVE_MIN_INTERVAL_MS
+        },
         players: state.players,
         coins: state.coins
       }));
@@ -334,19 +335,16 @@ wss.on('connection', (ws) => {
     }
 
     if (data.type === 'move') {
-      // анти-спам
       const now = Date.now();
       if (now - ws.lastMoveAt < MOVE_MIN_INTERVAL_MS) return;
       ws.lastMoveAt = now;
 
-      // санитизация текущей позиции
       if (!playerFree(me.x, me.y, ws.sessionId, true)) {
         const spot = findFreeSpot(me, ws.sessionId);
         console.log(`Освобождение: ${ws.sessionId} (${me.x},${me.y}) → (${spot.x},${spot.y})`);
         me.x = spot.x; me.y = spot.y;
       }
 
-      // валидация ввода
       const rawDx = Number(data.dx);
       const rawDy = Number(data.dy);
       const sdx = Number.isFinite(rawDx) ? Math.max(-MAX_STEP, Math.min(MAX_STEP, Math.trunc(rawDx))) : 0;
@@ -355,26 +353,14 @@ wss.on('connection', (ws) => {
       const nx = Math.max(0, Math.min(MAP.w - PLAYER_SIZE, me.x + sdx));
       const ny = Math.max(0, Math.min(MAP.h - PLAYER_SIZE, me.y + sdy));
 
-      const isFree = (x, y) => {
-        for (const otherId in state.players) {
-          if (otherId === ws.sessionId) continue;
-          const other = state.players[otherId];
-          if (other.online === false) continue;
-          if (overlaps({ x, y }, other, PLAYER_SIZE, PLAYER_SIZE)) return false;
-        }
-        return true;
-      };
-
-      // axis-sliding: сначала пробуем целиком, потом по одной оси
-      if (isFree(nx, ny)) {
+      if (playerFree(nx, ny, ws.sessionId, true)) {
         me.x = nx; me.y = ny;
-      } else if (sdx !== 0 && isFree(nx, me.y)) {
+      } else if (sdx !== 0 && playerFree(nx, me.y, ws.sessionId, true)) {
         me.x = nx;
-      } else if (sdy !== 0 && isFree(me.x, ny)) {
+      } else if (sdy !== 0 && playerFree(me.x, ny, ws.sessionId, true)) {
         me.y = ny;
       }
 
-      // сбор монет
       for (let i = state.coins.length - 1; i >= 0; i--) {
         const c = state.coins[i];
         if (overlaps({ x: me.x, y: me.y }, c, PLAYER_SIZE, COIN_SIZE)) {
