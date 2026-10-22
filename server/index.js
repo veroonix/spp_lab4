@@ -9,13 +9,8 @@ let CFG = null;
 const configPath = path.join(__dirname, '..', 'config.json');
 
 try {
-  // Покажем в логах, какие файлы Render реально видит в корне (/app)
-  console.log('=== ФАЙЛЫ В ПАПКЕ /app ===', fs.readdirSync(path.join(__dirname, '..')));
-  
   CFG = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  console.log('=== УСПЕХ: config.json УСПЕШНО ЗАГРУЖЕН ===');
 } catch (err) {
-  console.error('=== ОШИБКА: config.json НЕ НАЙДЕН ИЛИ БИТЫЙ ===', err.message);
   // Если файла нет, ставим настройки по умолчанию, чтобы сервер не падал
   CFG = {
     MAP: { w: 600, h: 400 },
