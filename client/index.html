@@ -160,8 +160,7 @@
         if (msg.type === 'init') {
           myId = msg.id;
           try { localStorage.setItem(SESSION_KEY, myId); } catch {}
-
-          // ← единый контракт: размеры мира берём у сервера
+          
           if (msg.config) {
             CFG = msg.config;
             canvas.width  = CFG.MAP.w;
