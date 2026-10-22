@@ -4,8 +4,34 @@ const path = require('path');
 const crypto = require('crypto');
 const WebSocket = require('ws');
 
-// ---------- конфигурация ----------
-const CFG = require(path.join(__dirname, '..', 'config.json'));
+// --- БЕЗОПАСНАЯ ЗАГРУЗКА КОНФИГА ---
+let CFG = null;
+const configPath = path.join(__dirname, '..', 'config.json');
+
+try {
+  // Покажем в логах, какие файлы Render реально видит в корне (/app)
+  console.log('=== ФАЙЛЫ В ПАПКЕ /app ===', fs.readdirSync(path.join(__dirname, '..')));
+  
+  CFG = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  console.log('=== УСПЕХ: config.json УСПЕШНО ЗАГРУЖЕН ===');
+} catch (err) {
+  console.error('=== ОШИБКА: config.json НЕ НАЙДЕН ИЛИ БИТЫЙ ===', err.message);
+  // Если файла нет, ставим настройки по умолчанию, чтобы сервер не падал
+  CFG = {
+    MAP: { w: 600, h: 400 },
+    PLAYER_SIZE: 20,
+    COIN_SIZE: 12,
+    COIN_COUNT: 8,
+    MAX_STEP: 20,
+    HEARTBEAT_INTERVAL: 5000,
+    INACTIVITY_TIMEOUT: 60000,
+    SERVER_PING_INTERVAL: 15000,
+    PLAYER_TTL_MS: 86400000,
+    SAVE_DEBOUNCE_MS: 500,
+    MOVE_MIN_INTERVAL_MS: 20
+  };
+}
+// -----------------------------------
 
 const PORT = process.env.PORT || 8080;
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
