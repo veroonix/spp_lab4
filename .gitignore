@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+
+# logs
+*.log
+npm-debug.log*
+
+# env
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# runtime data (если state.json не должен попадать в git)
+server/state.json
+server/state.json.tmp
