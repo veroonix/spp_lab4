@@ -72,10 +72,10 @@ function findFreeSpot(preferred, ignoreId = null) {
   for (let r = 1; r <= maxR; r++) {
     for (let i = -r; i <= r; i++) {
       const ring = [
-        [px + i * PLAYER_SIZE, py - r * PLAYER_SIZE],
-        [px + i * PLAYER_SIZE, py + r * PLAYER_SIZE],
-        [px - r * PLAYER_SIZE, py + i * PLAYER_SIZE],
-        [px + r * PLAYER_SIZE, py + i * PLAYER_SIZE]
+        [px + i * PLAYER_SIZE, py - r * PLAYER_SIZE], // Верхняя граница кольца
+        [px + i * PLAYER_SIZE, py + r * PLAYER_SIZE], // Нижняя граница кольца
+        [px - r * PLAYER_SIZE, py + i * PLAYER_SIZE], // Левая граница
+        [px + r * PLAYER_SIZE, py + i * PLAYER_SIZE]  // Правая граница
       ];
       for (const [x, y] of ring) {
         if (x < 0 || y < 0 || x + PLAYER_SIZE > MAP.w || y + PLAYER_SIZE > MAP.h) continue;
