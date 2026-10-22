@@ -3,6 +3,12 @@
   "PLAYER_SIZE": 20,
   "COIN_SIZE": 12,
   "COIN_COUNT": 8,
+  "COIN_TYPES": [
+    { "name": "бронзовая", "color": "#cd7f32", "points": 1, "weight": 55 },
+    { "name": "серебряная", "color": "#c9d1d9", "points": 2, "weight": 28 },
+    { "name": "золотая", "color": "#ffd700", "points": 3, "weight": 12 },
+    { "name": "рубиновая", "color": "#e0115f", "points": 5, "weight": 5 }
+  ],
   "MAX_STEP": 20,
 
   "HEARTBEAT_INTERVAL": 5000,

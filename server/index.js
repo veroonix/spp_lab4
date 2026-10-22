@@ -17,6 +17,7 @@ try {
     PLAYER_SIZE: 20,
     COIN_SIZE: 12,
     COIN_COUNT: 8,
+    COIN_TYPES: null,
     MAX_STEP: 20,
     HEARTBEAT_INTERVAL: 5000,
     INACTIVITY_TIMEOUT: 60000,
@@ -28,15 +29,39 @@ try {
 }
 // -----------------------------------
 
+// ---------- типы монет ----------
+const DEFAULT_COIN_TYPES = [
+  { name: 'бронзовая',  color: '#cd7f32', points: 1, weight: 55 },
+  { name: 'серебряная', color: '#c9d1d9', points: 2, weight: 28 },
+  { name: 'золотая',    color: '#ffd700', points: 3, weight: 12 },
+  { name: 'рубиновая',  color: '#e0115f', points: 5, weight: 5 }
+];
+
+const isHexColor = (v) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
+
+function normalizeCoinTypes(list) {
+  if (!Array.isArray(list) || list.length === 0) return DEFAULT_COIN_TYPES;
+  return list.map((t, i) => ({
+    name: typeof t.name === 'string' && t.name ? t.name.slice(0, 24) : `монета ${i + 1}`,
+    color: isHexColor(t.color) ? t.color : '#e6b800',
+    points: Math.max(1, Math.trunc(Number(t.points)) || 1),
+    weight: Math.max(1, Number(t.weight) || 1)
+  }));
+}
+
+CFG.COIN_TYPES = normalizeCoinTypes(CFG.COIN_TYPES);
+
 const PORT = process.env.PORT || 8080;
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
 const CLIENT_DIR = path.resolve(__dirname, '..', 'client');
 
 const {
-  MAP, PLAYER_SIZE, COIN_SIZE, COIN_COUNT, MAX_STEP,
+  MAP, PLAYER_SIZE, COIN_SIZE, COIN_COUNT, COIN_TYPES, MAX_STEP,
   HEARTBEAT_INTERVAL, INACTIVITY_TIMEOUT, SERVER_PING_INTERVAL,
   PLAYER_TTL_MS, SAVE_DEBOUNCE_MS, MOVE_MIN_INTERVAL_MS
 } = CFG;
+
+const COIN_TOTAL_WEIGHT = COIN_TYPES.reduce((sum, t) => sum + t.weight, 0);
 
 let state = { players: {}, coins: [] };
 
@@ -45,6 +70,22 @@ const rnd = (maxInclusive) => Math.floor(Math.random() * (maxInclusive + 1));
 const randomColor = () => '#' + Math.floor(Math.random() * 0x1000000).toString(16).padStart(6, '0');
 const randomId = () => crypto.randomBytes(8).toString('hex');
 const randomPos = (size) => ({ x: rnd(MAP.w - size), y: rnd(MAP.h - size) });
+
+function sanitizeName(raw) {
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  const name = Array.from(cleaned).slice(0, 20).join('');
+  return name || null;
+}
+
+function pickCoinType() {
+  let r = Math.random() * COIN_TOTAL_WEIGHT;
+  for (let i = 0; i < COIN_TYPES.length; i++) {
+    r -= COIN_TYPES[i].weight;
+    if (r < 0) return i;
+  }
+  return COIN_TYPES.length - 1;
+}
 
 function overlaps(a, b, sa, sb) {
   return a.x < b.x + sb && a.x + sa > b.x &&
@@ -99,9 +140,9 @@ function spawnCoin() {
       if (pl.online === false) continue;
       if (overlaps(pos, pl, COIN_SIZE, PLAYER_SIZE)) { ok = false; break; }
     }
-    if (ok) { state.coins.push({ id: randomId(), ...pos }); return; }
+    if (ok) { state.coins.push({ id: randomId(), ...pos, type: pickCoinType() }); return; }
   }
-  state.coins.push({ id: randomId(), ...randomPos(COIN_SIZE) });
+  state.coins.push({ id: randomId(), ...randomPos(COIN_SIZE), type: pickCoinType() });
 }
 
 // ---------- persist ----------
@@ -137,11 +178,22 @@ if (fs.existsSync(STATE_FILE)) {
   try {
     const loaded = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     state.players = loaded.players || {};
-    state.coins   = loaded.coins   || [];
+    // монеты из старых сохранений без типа считаем бронзовыми
+    state.coins = (Array.isArray(loaded.coins) ? loaded.coins : [])
+      .filter((c) => c && Number.isFinite(c.x) && Number.isFinite(c.y))
+      .map((c) => ({
+        id: typeof c.id === 'string' && c.id ? c.id : randomId(),
+        x: c.x,
+        y: c.y,
+        type: Number.isInteger(c.type) && c.type >= 0 && c.type < COIN_TYPES.length ? c.type : 0
+      }));
     const now = Date.now();
     for (const id in state.players) {
-      state.players[id].online = false;
-      state.players[id].offlineAt = now;
+      const p = state.players[id];
+      if (typeof p.name !== 'string' || !p.name) p.name = 'Игрок';
+      if (!isHexColor(p.color)) p.color = randomColor();
+      p.online = false;
+      p.offlineAt = now;
     }
     console.log(`Загружено: ${Object.keys(state.players).length} игроков, ${state.coins.length} монеток`);
   } catch (e) {
@@ -302,6 +354,8 @@ wss.on('connection', (ws) => {
     ws.isAlive = true;
 
     if (data.type === 'hello') {
+      const reqName = sanitizeName(data.name);
+      const reqColor = isHexColor(data.color) ? data.color : null;
       const known = typeof data.sessionId === 'string' && data.sessionId && state.players[data.sessionId];
 
       if (known) {
@@ -312,21 +366,25 @@ wss.on('connection', (ws) => {
           console.log(`Пересечение при возвращении: ${ws.sessionId} (${p.x},${p.y}) → (${spot.x},${spot.y})`);
           p.x = spot.x; p.y = spot.y;
         }
+        if (reqName) p.name = reqName;
+        if (!p.name) p.name = 'Игрок';
+        if (reqColor) p.color = reqColor;
         p.online = true;
         p.offlineAt = null;
         p.lastSeen = Date.now();
-        console.log(`Реконнект: ${ws.sessionId}`);
+        console.log(`Реконнект: ${ws.sessionId} (${p.name})`);
       } else {
         ws.sessionId = randomId();
         state.players[ws.sessionId] = {
           ...findFreeSpot(randomPos(PLAYER_SIZE), ws.sessionId),
-          color: randomColor(),
+          name: reqName || 'Игрок',
+          color: reqColor || randomColor(),
           score: 0,
           online: true,
           lastSeen: Date.now(),
           offlineAt: null
         };
-        console.log(`Новый игрок: ${ws.sessionId}`);
+        console.log(`Новый игрок: ${ws.sessionId} (${state.players[ws.sessionId].name})`);
       }
 
       ws.send(JSON.stringify({
@@ -336,6 +394,7 @@ wss.on('connection', (ws) => {
           MAP,
           PLAYER_SIZE,
           COIN_SIZE,
+          COIN_TYPES,
           MOVE_MIN_INTERVAL_MS
         },
         players: state.players,
@@ -353,6 +412,19 @@ wss.on('connection', (ws) => {
     if (me.online === false) {
       me.online = true;
       me.offlineAt = null;
+    }
+
+    if (data.type === 'profile') {
+      const name = sanitizeName(data.name);
+      const color = isHexColor(data.color) ? data.color : null;
+      let changed = false;
+      if (name && name !== me.name) { me.name = name; changed = true; }
+      if (color && color !== me.color) { me.color = color; changed = true; }
+      if (changed) {
+        broadcast({ type: 'join', id: ws.sessionId, player: me });
+        scheduleSave();
+      }
+      return;
     }
 
     if (data.type === 'move') {
@@ -386,9 +458,10 @@ wss.on('connection', (ws) => {
         const c = state.coins[i];
         if (overlaps({ x: me.x, y: me.y }, c, PLAYER_SIZE, COIN_SIZE)) {
           state.coins.splice(i, 1);
-          me.score += 1;
+          const coinType = COIN_TYPES[c.type] || COIN_TYPES[0];
+          me.score += coinType.points;
           spawnCoin();
-          console.log(` ${ws.sessionId} +балл, очки=${me.score}`);
+          console.log(` ${ws.sessionId} +${coinType.points} (${coinType.name}), очки=${me.score}`);
         }
       }
 

@@ -17,12 +17,39 @@
       filter: grayscale(0.6);
     }
     canvas { background: #eee; border: 2px solid #444; border-radius: 4px; }
-    #hud { display: flex; gap: 20px; font-size: 14px; align-items: center; }
+    #hud {
+      display: flex; gap: 20px; font-size: 14px; align-items: center;
+      flex-wrap: wrap; justify-content: center; max-width: 600px;
+    }
     #status { padding: 4px 12px; border-radius: 6px; background: #444; transition: background 0.3s; }
     #status.online { background: #2a7d4b; }
     #status.offline { background: #a33; }
     #status.reconnecting { background: #e89c13; animation: blink 1s infinite; }
     @keyframes blink { 50% { opacity: 0.7; } }
+    .field { display: flex; align-items: center; gap: 6px; }
+    #name {
+      width: 130px; background: #2b2b2b; color: #eee;
+      border: 1px solid #555; border-radius: 6px;
+      padding: 4px 8px; font: inherit;
+    }
+    #name:focus { outline: none; border-color: #40c4ff; }
+    #palette { display: flex; gap: 4px; }
+    .swatch {
+      width: 20px; height: 20px; padding: 0; border-radius: 50%;
+      border: 2px solid transparent; cursor: pointer;
+      transition: transform 0.1s, box-shadow 0.15s;
+    }
+    .swatch:hover { transform: scale(1.12); }
+    .swatch.selected { border-color: #fff; box-shadow: 0 0 0 2px #40c4ff; }
+    #legend {
+      display: flex; gap: 14px; flex-wrap: wrap;
+      justify-content: center; font-size: 12px; color: #bbb;
+    }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-item i {
+      width: 12px; height: 12px; border-radius: 50%;
+      display: inline-block; border: 1px solid rgba(0,0,0,0.6);
+    }
     #offline-banner {
       display: none;
       position: fixed; top: 0; left: 0; right: 0;
@@ -38,6 +65,11 @@
     }
     #scores .me { color: #ffeb3b; font-weight: bold; }
     #scores .dead { opacity: 0.4; }
+    #scores .dot {
+      display: inline-block; width: 9px; height: 9px;
+      border-radius: 2px; margin-right: 4px;
+      vertical-align: middle; border: 1px solid rgba(0,0,0,0.5);
+    }
   </style>
 </head>
 <body>
@@ -45,9 +77,14 @@
 
   <div id="hud">
     <span id="status" class="offline">соединение…</span>
-    <span>ID: <b id="me">—</b></span>
+    <label class="field" for="name">Имя:
+      <input id="name" maxlength="20" placeholder="Игрок" autocomplete="off" spellcheck="false">
+    </label>
+    <span class="field">Цвет: <span id="palette"></span></span>
     <span>Очки: <b id="score">0</b></span>
   </div>
+
+  <div id="legend"></div>
 
   <canvas id="game" width="600" height="400"></canvas>
 
@@ -61,12 +98,25 @@
       MAP: { w: 600, h: 400 },
       PLAYER_SIZE: 20,
       COIN_SIZE: 12,
-      MOVE_MIN_INTERVAL_MS: 20
+      MOVE_MIN_INTERVAL_MS: 20,
+      COIN_TYPES: [
+        { name: 'бронзовая',  color: '#cd7f32', points: 1 },
+        { name: 'серебряная', color: '#c9d1d9', points: 2 },
+        { name: 'золотая',    color: '#ffd700', points: 3 },
+        { name: 'рубиновая',  color: '#e0115f', points: 5 }
+      ]
     };
 
     const SESSION_KEY = 'lab4-session-id';
+    const NAME_KEY = 'lab4-player-name';
+    const COLOR_KEY = 'lab4-player-color';
     const OFFLINE_TIMEOUT = 30000;
     const RECONNECT_DELAY = 1500;
+    const PROFILE_DEBOUNCE = 300;
+    const PLAYER_COLORS = [
+      '#ff5252', '#ffb300', '#ffeb3b', '#69f0ae',
+      '#40c4ff', '#7c4dff', '#ff4081', '#ffffff'
+    ];
 
     let socket = null;
     let myId = null;
@@ -74,14 +124,74 @@
     let coins = [];
     let reconnectTimer = null;
     let offlineTimer = null;
+    let profileTimer = null;
     let isOnline = false;
     let lastMoveSentAt = 0;
 
     const statusEl = document.getElementById('status');
     const bannerEl = document.getElementById('offline-banner');
     const scoresEl = document.getElementById('scores');
-    const meEl = document.getElementById('me');
     const scoreEl = document.getElementById('score');
+    const nameInput = document.getElementById('name');
+    const paletteEl = document.getElementById('palette');
+    const legendEl = document.getElementById('legend');
+
+    function loadSaved(key, fallback = null) {
+      try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
+    }
+    function saveValue(key, value) {
+      try { localStorage.setItem(key, value); } catch {}
+    }
+
+    nameInput.value = loadSaved(NAME_KEY, '');
+
+    let selectedColor = loadSaved(COLOR_KEY);
+    if (!PLAYER_COLORS.includes(selectedColor)) {
+      selectedColor = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
+    }
+
+    // ===== палитра цветов =====
+    function buildPalette() {
+      for (const color of PLAYER_COLORS) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'swatch';
+        btn.style.background = color;
+        btn.dataset.color = color;
+        btn.title = color;
+        btn.addEventListener('click', () => selectColor(color));
+        paletteEl.appendChild(btn);
+      }
+      markSelectedColor();
+    }
+
+    function markSelectedColor() {
+      for (const btn of paletteEl.children) {
+        btn.classList.toggle('selected', btn.dataset.color === selectedColor);
+      }
+    }
+
+    function selectColor(color) {
+      selectedColor = color;
+      saveValue(COLOR_KEY, color);
+      markSelectedColor();
+      sendProfile();
+    }
+
+    // ===== легенда монет =====
+    function pointsWord(n) {
+      const mod10 = n % 10;
+      const mod100 = n % 100;
+      if (mod10 === 1 && mod100 !== 11) return 'очко';
+      if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'очка';
+      return 'очков';
+    }
+
+    function renderLegend() {
+      legendEl.innerHTML = (CFG.COIN_TYPES || []).map((t) =>
+        `<span class="legend-item"><i style="background:${t.color}"></i>${t.points} ${pointsWord(t.points)}</span>`
+      ).join('');
+    }
 
     // ===== статус =====
     function setStatus(text, cls) {
@@ -124,6 +234,39 @@
       reconnectTimer = setTimeout(connect, delay);
     }
 
+    // ===== профиль игрока =====
+    function sendProfile() {
+      if (!socket || socket.readyState !== WebSocket.OPEN || !isOnline) return;
+      const name = nameInput.value.trim();
+      if (name) saveValue(NAME_KEY, name);
+      socket.send(JSON.stringify({ type: 'profile', name, color: selectedColor }));
+    }
+
+    function scheduleProfile() {
+      clearTimeout(profileTimer);
+      profileTimer = setTimeout(sendProfile, PROFILE_DEBOUNCE);
+    }
+
+    nameInput.addEventListener('input', () => {
+      const name = nameInput.value.trim();
+      if (name) saveValue(NAME_KEY, name);
+      scheduleProfile();
+    });
+
+    nameInput.addEventListener('change', () => {
+      clearTimeout(profileTimer);
+      sendProfile();
+    });
+
+    nameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        clearTimeout(profileTimer);
+        sendProfile();
+        nameInput.blur();
+      }
+    });
+
     // ===== подключение + авто-реконнект =====
     function connect() {
       clearTimeout(reconnectTimer);
@@ -139,7 +282,12 @@
         setStatus('онлайн', 'online');
         let saved = null;
         try { saved = localStorage.getItem(SESSION_KEY); } catch {}
-        ws.send(JSON.stringify({ type: 'hello', sessionId: saved }));
+        ws.send(JSON.stringify({
+          type: 'hello',
+          sessionId: saved,
+          name: nameInput.value.trim(),
+          color: selectedColor
+        }));
       };
 
       ws.onmessage = (e) => {
@@ -160,18 +308,24 @@
         if (msg.type === 'init') {
           myId = msg.id;
           try { localStorage.setItem(SESSION_KEY, myId); } catch {}
-          
+
           if (msg.config) {
             CFG = msg.config;
             canvas.width  = CFG.MAP.w;
             canvas.height = CFG.MAP.h;
+            renderLegend();
           }
           players = msg.players || {};
           coins = msg.coins || [];
-          meEl.textContent = myId;
+
+          const me = players[myId];
+          if (me && !nameInput.value.trim()) nameInput.value = me.name || 'Игрок';
+          if (me && PLAYER_COLORS.includes(me.color)) {
+            selectedColor = me.color;
+            markSelectedColor();
+          }
         } else if (msg.type === 'state') {
           players = msg.players || {};
-          coins = msg.coins || {};
           coins = msg.coins || [];
         } else if (msg.type === 'join') {
           players[msg.id] = msg.player;
@@ -199,17 +353,42 @@
     }
 
     // ===== отрисовка =====
+    function textColorFor(hex) {
+      const n = parseInt(String(hex).slice(1), 16);
+      const r = (n >> 16) & 255;
+      const g = (n >> 8) & 255;
+      const b = n & 255;
+      return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? '#111' : '#fff';
+    }
+
     function draw() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const S = CFG.PLAYER_SIZE;
       const C = CFG.COIN_SIZE;
+      const types = CFG.COIN_TYPES || [];
 
       for (const c of coins) {
-        ctx.fillStyle = '#e6b800';
+        const type = types[c.type] || types[0] || { color: '#e6b800', points: 1 };
+        const cx = c.x + C / 2;
+        const cy = c.y + C / 2;
+
         ctx.beginPath();
-        ctx.arc(c.x + C / 2, c.y + C / 2, C / 2, 0, Math.PI * 2);
+        ctx.arc(cx, cy, C / 2, 0, Math.PI * 2);
+        ctx.fillStyle = type.color;
         ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        ctx.stroke();
+
+        ctx.fillStyle = textColorFor(type.color);
+        ctx.font = 'bold 8px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(type.points), cx, cy + 0.5);
       }
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
 
       for (const id in players) {
         const p = players[id];
@@ -217,13 +396,28 @@
         ctx.fillStyle = p.color;
         ctx.fillRect(p.x, p.y, S, S);
 
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(p.x + 0.5, p.y + 0.5, S - 1, S - 1);
+
         if (id === myId) {
           ctx.strokeStyle = '#000';
           ctx.lineWidth = 2;
-          ctx.strokeRect(p.x, p.y, S, S);
+          ctx.strokeRect(p.x - 1, p.y - 1, S + 2, S + 2);
         }
+
+        ctx.fillStyle = '#222';
+        ctx.font = '10px monospace';
+        ctx.fillText(p.name || 'Игрок', p.x + S / 2, p.y - 3);
       }
       ctx.globalAlpha = 1;
+    }
+
+    // ===== таблица очков =====
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[ch]));
     }
 
     function renderScores() {
@@ -232,8 +426,10 @@
       scoresEl.innerHTML = sorted.map(([id, p]) => {
         const cls = [id === myId ? 'me' : '', p.online === false ? 'dead' : ''].join(' ');
         const mark = id === myId ? '★' : '•';
+        const name = escapeHtml(p.name || 'Игрок');
+        const color = /^#[0-9a-f]{6}$/i.test(p.color || '') ? p.color : '#888';
         const status = p.online === false ? ' (оффлайн)' : '';
-        return `<div class="${cls}">${mark} ${id} — ${p.score}${status}</div>`;
+        return `<div class="${cls}"><span class="dot" style="background:${color}"></span>${mark} ${name} — ${p.score}${status}</div>`;
       }).join('');
 
       if (myId && players[myId]) {
@@ -243,6 +439,11 @@
 
     // ===== управление =====
     window.addEventListener('keydown', (e) => {
+      const target = e.target;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+
       const moves = {
         ArrowUp: [0, -10], ArrowDown: [0, 10],
         ArrowLeft: [-10, 0], ArrowRight: [10, 0],
@@ -263,6 +464,8 @@
       socket.send(JSON.stringify({ type: 'move', dx: m[0], dy: m[1] }));
     });
 
+    buildPalette();
+    renderLegend();
     connect();
 
     document.addEventListener('visibilitychange', () => {
